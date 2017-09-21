@@ -1,8 +1,14 @@
-'''DenseNet models for Keras.
-# Reference
-- [Densely Connected Convolutional Networks](https://arxiv.org/pdf/1608.06993.pdf)
-- [The One Hundred Layers Tiramisu: Fully Convolutional DenseNets for Semantic Segmentation](https://arxiv.org/pdf/1611.09326.pdf)
 '''
+Dual Path Networks for Keras.
+
+In short, this network combines the idea of a ResNet with the recent
+advent of the DenseNet.  In theory, it should provide the benefits of 
+both models for a more efficient and expressive solution.
+
+# Reference:
+    https://arxiv.org/pdf/1707.01629.pdf
+'''
+
 from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
@@ -55,10 +61,10 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
                 
     '''Instantiate a slight modification of the Dual Path Network architecture.
         The main tenants are the same, but some liberities were taken to combine 
-        it with other prominent work in computer vision.  Accordingly, multiple 
-        filter sizes are used for the "grouped" or separable convolutions.  Also, 
-        an optional dropout is added to the final layer.  Aside from that, it is 
-        very similar to the orginal construct.
+        it with other prominent work in computer vision.  As such, multiple filter 
+        sizes are used for the "grouped" or separable convolutions.  Also, an 
+        optional dropout is added to the final layer.  Aside from that, it is very 
+        similar to the orginal construct.
 
         # Arguments
             input_shape: optional shape tuple, only to be specified
@@ -78,7 +84,7 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
                 If -1, calculates nb_layer_per_block from the network depth.
                 If positive integer, a set number of layers per dense block.
                 If list, nb_layer is used as provided. Note that list size must be "nb_dense_block" in size.
-            final_dropout_rate: dropout rate of final layer
+            dropout_rate: dropout rate of final layer
             weight_decay: weight decay factor
             include_top: whether to include the fully-connected
                 layer at the top of the network.
@@ -119,13 +125,13 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
                            init_filters, nb_layers_per_block, dropout_rate, 
                            weight_decay, activation)
 
-    # Ensure that the model takes into account any potential predecessors of `input_tensor`.
+    # Ensure that the model takes into account any potential predecessors of 'input_tensor'
     if input_tensor is not None:
         inputs = get_source_inputs(input_tensor)
     else:
         inputs = img_input
         
-    # Create and return model.
+    # Create and return the model
     model = Model(inputs, x, name='dpn_net')
 
     
@@ -133,13 +139,14 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
 
 
 def __conv_block(ip, nb_filter, smaller_filters=False, weight_decay=DEFAULT_WEIGHT_DECAY):
-    ''' Apply BatchNorm, Relu, 3x3 Conv2D, optional bottleneck block and dropout
+    ''' Apply BatchNorm, Relu, 3x3 Conv2D for downsize and then two distinct separable conv ops
     Args:
-        ip: Input keras tensor
+        ip: input keras tensor
         nb_filter: final number of filters to output
+        smaller_filters: flag for trigerring a 2x2 separable conv (instead of a 5x5 one)
         weight_decay: weight decay factor
         
-    Returns: keras tensor with after block with two filter sizes
+    Returns: keras tensor with after block using two filter sizes
     '''
 
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
@@ -154,32 +161,31 @@ def __conv_block(ip, nb_filter, smaller_filters=False, weight_decay=DEFAULT_WEIG
                            beta_regularizer=l2(weight_decay))(ip)
     x = Activation('relu')(x)    
     x = Conv2D(int(nb_filter // 3), (1, 1), kernel_initializer='he_uniform', padding='same', 
-                    use_bias=False, kernel_regularizer=l2(weight_decay))(x)
+                    use_bias=True, kernel_regularizer=l2(weight_decay))(x)
 
     
     # In the vein of NAS convolutional cells, perform two different sized seperable convolutions and add them
     x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(x)
     x = Activation('relu')(x)    
-    x3by3 = SeparableConv2D(nb_filter, (3, 3), padding='same', use_bias=False)(x)
-    x_other = SeparableConv2D(nb_filter, (alt_filter_size, alt_filter_size), padding='same', use_bias=False)(x)
+    x3by3 = SeparableConv2D(nb_filter, (3, 3), padding='same', use_bias=True)(x)
+    x_other = SeparableConv2D(nb_filter, (alt_filter_size, alt_filter_size), padding='same', use_bias=True)(x)
 
     output = add([x3by3, x_other])
     
-
+    
     return output
 
 
 def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIGHT_DECAY):
-    ''' Apply BatchNorm, Relu 1x1, Conv2D, optional compression, dropout and Maxpooling2D
+    ''' Apply BatchNorm, Relu, Conv2D to the last two transition inputs and then combine to downsize
     Args:
         prev_ip: keras tensor (e.g. input of current block)
         cur_ip: keras tensor (e.g. output of current block)
-        nb_filter: number of filters
-        dropout_rate: dropout rate
+        new_nb_filter: new number of filters
         weight_decay: weight decay factor
         
-    Returns: keras tensor, after applying batch_norm, relu-conv, dropout, maxpool
+    Returns: keras tensor after applying transition operations on both inputs
     '''
 
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
@@ -191,12 +197,12 @@ def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIG
     x1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(prev_ip)
     x1 = Activation('relu')(x1)
-    x1 = Conv2D(new_nb_filter, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=False,
+    x1 = Conv2D(new_nb_filter, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=True,
                kernel_regularizer=l2(weight_decay))(x1)    
     x1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(x1)
     x1 = Activation('relu')(x1)
-    x1 = SeparableConv2D(new_nb_filter, (5, 5), kernel_initializer='he_uniform', padding='same', use_bias=False,
+    x1 = SeparableConv2D(new_nb_filter, (5, 5), kernel_initializer='he_uniform', padding='same', use_bias=True,
                kernel_regularizer=l2(weight_decay))(x1)
     x1 = AveragePooling2D((2, 2), strides=(2, 2))(x1)
     
@@ -204,12 +210,12 @@ def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIG
     x2 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(cur_ip)
     x2 = Activation('relu')(x2)
-    x2 = Conv2D(new_nb_filter, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=False,
+    x2 = Conv2D(new_nb_filter, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=True,
                kernel_regularizer=l2(weight_decay))(x2)        
     x2 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(x2)
     x2 = Activation('relu')(x2)                   
-    x2 = SeparableConv2D(new_nb_filter, (3, 3), strides=(2, 2), padding='same', use_bias=False)(x2)
+    x2 = SeparableConv2D(new_nb_filter, (3, 3), strides=(2, 2), padding='same', use_bias=True)(x2)
     
     # Add them together and output them
     output = add([x1, x2])
@@ -220,7 +226,7 @@ def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIG
     
 # Helper Layer for getting a subsection of a layer
 #  
-# Usage example:    x = crop(2,5,10)(x)
+# Usage example:    x = crop(2, 5, 10)(x)
 def crop(dimension, start, end=0):
     def func(x, dimension=dimension, start=start, end=end):
         if not end:
@@ -243,7 +249,7 @@ def crop(dimension, start, end=0):
     return Lambda(func)
 
     
-def __dense_block(x, nb_layers, nb_filter, growth_rate, smaller_filters=False, 
+def __dpn_block(x, nb_layers, nb_filter, growth_rate, smaller_filters=False, 
                     weight_decay=DEFAULT_WEIGHT_DECAY):
     ''' Build a dense_block where the output of each conv_block is fed to subsequent ones
             Args:
@@ -251,6 +257,7 @@ def __dense_block(x, nb_layers, nb_filter, growth_rate, smaller_filters=False,
                 nb_layers: the number of layers of conv_block to append to the model
                 nb_filter: current number of residual_filters
                 growth_rate: growth rate
+                smaller_filters: flag for using smaller filters later in the network
                 weight_decay: weight decay factor
                 
             Returns: keras tensor with updated features after nb_layers __conv_block calls
@@ -281,7 +288,7 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
                         nb_dense_block=DEFAULT_NUM_BLOCKS, init_filters=DEFAULT_INIT_FILTERS, 
                         nb_layers_per_block=DEFAULT_LAYERS_PER_BLOCK, dropout_rate=DEFAULT_DROPOUT_RATE, 
                         weight_decay=DEFAULT_WEIGHT_DECAY, activation='softmax'):
-    ''' Build the DPN model
+    ''' Build the DPN model.
     Args:
         nb_classes: number of classes
         img_input: tuple of shape (channels, rows, columns) or (rows, columns, channels)
@@ -332,7 +339,7 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
     # Initial convolution
     x = Conv2D(init_filters, (3, 3), kernel_initializer='he_uniform', 
                 padding='same', name='initial_conv2D',
-                use_bias=False, kernel_regularizer=l2(weight_decay))(img_input)
+                use_bias=True, kernel_regularizer=l2(weight_decay))(img_input)
 
 	
     # Check init filters to make sure they are an acceptable value
@@ -376,7 +383,7 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
             smaller_filters = False
 
         # Get dense block            
-        x = __dense_block(x, nb_layers[block_idx], init_filters, 
+        x = __dpn_block(x, nb_layers[block_idx], init_filters, 
                                         growth_channels, smaller_filters, 
                                         weight_decay=weight_decay)
 		
@@ -400,7 +407,8 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
         x = Dense(nb_classes, activation=activation, kernel_regularizer=l2(weight_decay), 
                         bias_regularizer=l2(weight_decay))(x)
 
-                        
+    
+    # Return final layer's logits
     return x
     
     
@@ -456,7 +464,7 @@ if __name__ == '__main__':
     
     
     # Set up cosine annealing LR schedule callback
-    init_lr_val = 0.1    
+    init_lr_val = 0.15
     num_epochs = 75
 
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):

@@ -1,8 +1,23 @@
-'''DenseNet models for Keras.
-# Reference
-- [Densely Connected Convolutional Networks](https://arxiv.org/pdf/1608.06993.pdf)
-- [The One Hundred Layers Tiramisu: Fully Convolutional DenseNets for Semantic Segmentation](https://arxiv.org/pdf/1611.09326.pdf)
 '''
+Densely Connected Network model for Keras.
+
+This model is unique in that it does not use residual connections but rather,
+it saves a same set of channels for each layer and leverages them as inputs to 
+subsequent layers.  This has the effect of shortening the distance between layers 
+and therefore improving gradient flow.  It is one of the most influential models 
+in the past several years in computer vision. 
+
+# Note:
+    While the code for a DenseNet model will always look similar regardless of 
+    particular implementation choices, it is still prudent to acknowledge the 
+    heavy influence of the GitHub repo (titu1994/DenseNet) on this work.  There 
+    have been a large number of substanial changes made to the original code, 
+    but the core of the code remains the same in spirit.
+
+# Reference:
+    https://arxiv.org/pdf/1608.06993.pdf
+'''
+
 from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
@@ -38,7 +53,7 @@ from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
 
 
-DEFAULT_DROPOUT_RATE=0.2
+DEFAULT_FINAL_DROPOUT_RATE=0.2
 
 TH_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Theano-Backend-TH-dim-ordering.h5'
 TF_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Tensorflow-Backend-TF-dim-ordering.h5'
@@ -52,16 +67,15 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
 				final_dropout=0.0, weight_decay=1E-4, include_top=True, weights='cifar10', 
 				input_tensor=None, classes=100, activation='softmax'):
 			 
-    '''Instantiate the DenseNet architecture,
-        optionally loading weights pre-trained
-        on CIFAR-10. Note that when using TensorFlow,
-        for best performance you should set
-        `image_data_format='channels_last'` in your Keras config
-        at ~/.keras/keras.json.
-        The model and the weights are compatible with both
-        TensorFlow and Theano. The dimension ordering
-        convention used by the model is the one
-        specified in your Keras config file.
+    '''Instantiate the DenseNet architecture, optionally loading weights pre-trained
+        on CIFAR-10. Note that when using TensorFlow, for best performance you should 
+        set `image_data_format='channels_last'` in your Keras config at ~/.keras/keras.json.
+        
+        The model and the weights are compatible with both TensorFlow and Theano. 
+        
+        The dimension ordering convention used by the model is the one specified in your Keras 
+        config file.
+        
         # Arguments
             input_shape: optional shape tuple, only to be specified
                 if `include_top` is False (otherwise the input shape
@@ -98,6 +112,7 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
                 if no `weights` argument is specified.
             activation: Type of activation at the top layer. Can be one of 'softmax' or 'sigmoid'.
                 Note that if sigmoid is used, classes must be 1.
+                
         # Returns
             A Keras model instance.
         '''
@@ -206,7 +221,7 @@ def __conv_block(ip, nb_filter, bottleneck=False, dropout_rate=None, weight_deca
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
 
     if bottleneck:
-        x = Conv2D(nb_filter * 4, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=False,
+        x = Conv2D(nb_filter * 4, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=True,
                    kernel_regularizer=l2(weight_decay))(ip)
 
         x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
@@ -215,7 +230,7 @@ def __conv_block(ip, nb_filter, bottleneck=False, dropout_rate=None, weight_deca
     else:
         x = ip
         
-    x = Conv2D(nb_filter, (3, 3), kernel_initializer='he_uniform', padding='same', use_bias=False,
+    x = Conv2D(nb_filter, (3, 3), kernel_initializer='he_uniform', padding='same', use_bias=True,
                kernel_regularizer=l2(weight_decay))(x)
 
     x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
@@ -237,13 +252,14 @@ def __transition_block(ip, nb_filter, compression=1.0, dropout_rate=None, weight
                     in the transition block.
         dropout_rate: dropout rate
         weight_decay: weight decay factor
+        
     Returns: keras tensor, after applying batch_norm, relu-conv, dropout, maxpool
     '''
 
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
 
-    x = Conv2D(int(nb_filter * compression), (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=False,
-               kernel_regularizer=l2(weight_decay))(ip)
+    x = Conv2D(int(nb_filter * compression), (1, 1), kernel_initializer='he_uniform', padding='same', 
+                use_bias=True, kernel_regularizer=l2(weight_decay))(ip)
     x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(x)
     x = Activation('relu')(x)
@@ -256,8 +272,8 @@ def __transition_block(ip, nb_filter, compression=1.0, dropout_rate=None, weight
     return x
 
 
-def __dense_block(x, nb_layers, nb_filter, growth_rate, bottleneck=False, dropout_rate=None, weight_decay=1E-4,
-                  grow_nb_filters=True, return_concat_list=False):
+def __dense_block(x, nb_layers, nb_filter, growth_rate, bottleneck=False, dropout_rate=None, 
+                weight_decay=1E-4):
     ''' Build a dense_block where the output of each conv_block is fed to subsequent ones
     Args:
         x: keras tensor
@@ -267,29 +283,19 @@ def __dense_block(x, nb_layers, nb_filter, growth_rate, bottleneck=False, dropou
         bottleneck: bottleneck block
         dropout_rate: dropout rate
         weight_decay: weight decay factor
-        grow_nb_filters: flag to decide to allow number of filters to grow
-        return_concat_list: return the list of feature maps along with the actual output
+        
     Returns: keras tensor with nb_layers of conv_block appended
     '''
 
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
 
-    x_list = [x]
-
     for i in range(nb_layers):
         cb = __conv_block(x, growth_rate, bottleneck, dropout_rate, weight_decay)
-        x_list.append(cb)
-
-        # x = concatenate(x_list, axis=concat_axis)
         x = concatenate([x, cb], axis=concat_axis)
+        
+        nb_filter += growth_rate
 
-        if grow_nb_filters:
-            nb_filter += growth_rate
-
-    if return_concat_list:
-        return x, nb_filter, x_list
-    else:
-        return x, nb_filter
+    return x, nb_filter
 
 
 def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_block=3, 
@@ -367,8 +373,9 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
 		
     # Add dense blocks
     for block_idx in range(nb_dense_block):
-        x, nb_filter = __dense_block(x, nb_layers[block_idx], nb_filter, growth_rate, bottleneck=bottleneck,
-                                     dropout_rate=dropout_rate, weight_decay=weight_decay)
+        x, nb_filter = __dense_block(x, nb_layers[block_idx], nb_filter, growth_rate, 
+                                        bottleneck=bottleneck, dropout_rate=dropout_rate, 
+                                        weight_decay=weight_decay)
 		
         # Add transition_block (for every block except the last one)
         if block_idx != (nb_dense_block-1):
@@ -376,8 +383,10 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
                                    weight_decay=weight_decay)
             nb_filter = int(nb_filter * compression)
 
+    # Once done, take an average pool of the spatial dimensions        
     x = GlobalAveragePooling2D(name="final_embeddings")(x)
-
+    
+    # Add final FC layer if requested
     if include_top:
         if final_dropout:
             x = Dropout(final_dropout, name="final_dropout")(x)
@@ -385,6 +394,8 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
         x = Dense(nb_classes, activation=activation, kernel_regularizer=l2(weight_decay), 
                         bias_regularizer=l2(weight_decay))(x)
 
+                        
+    # Return final embeddings                     
     return x
 	
 	
@@ -437,7 +448,7 @@ if __name__ == '__main__':
     
     
     # Set up cosine annealing LR schedule callback
-    init_lr_val = 0.1    
+    init_lr_val = 0.15
     num_epochs = 75
 
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):
@@ -483,7 +494,7 @@ if __name__ == '__main__':
     model = DenseNet(x_train.shape[1:], depth=124, 
                         nb_dense_block=3, nb_layers_per_block=[24, 64, 32],
 						bottleneck=True, reduction=0.4, growth_rate=20, weights=None, 
-						dropout_rate=0.0, final_dropout=general_dropout_rate, 
+						dropout_rate=0.0, final_dropout=DEFAULT_FINAL_DROPOUT_RATE, 
 						classes=num_classes)
     model.summary()
     

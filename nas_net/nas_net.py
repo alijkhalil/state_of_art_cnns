@@ -1,8 +1,15 @@
-'''DenseNet models for Keras.
-# Reference
-- [Densely Connected Convolutional Networks](https://arxiv.org/pdf/1608.06993.pdf)
-- [The One Hundred Layers Tiramisu: Fully Convolutional DenseNets for Semantic Segmentation](https://arxiv.org/pdf/1611.09326.pdf)
 '''
+NAS CNN Network (by Google) model for Keras.
+
+Though exact implementation details were a bit ambiguous, it is currently 
+the state-of-art in terms of both efficiency and accuracy in image 
+classification (on a variety of datasets).  It was created using machine 
+learning to construct convolutional "cells".  
+
+# Reference:
+	https://arxiv.org/pdf/1707.07012.pdf
+'''
+
 from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
@@ -133,7 +140,7 @@ def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION,
     return model
 
  
-# Layer for implementing drop path    
+# Layer for dropping path based on a "gate" variable   
 def drop_path(gate):
     def func(tensors, gate=gate):
         return K.switch(gate, tensors[1], tensors[0])
@@ -175,24 +182,24 @@ def add_with_potential_drop_path_helper(layers):
 
     # Go through each layer and dropout based on gate value
     for layer in layers:
-        # Add deathrate and drop gate variable to a global table
-        deathrate = K.variable(DEFAULT_DEATH_RATE)
+        # Add death_rate and drop gate variable to a global table
+        death_rate = K.variable(DEFAULT_DEATH_RATE)
         gate = K.variable(1, dtype='uint16')    
-        drop_table.append({"death_rate": deathrate, "gate": gate})
+        drop_table.append({"death_rate": death_rate, "gate": gate})
                 
         # Make copy of original layer with all zeros (for drop path)
         clear_path = K.zeros_like(layer)
         drop_tensor = zero_out_path()(layer)
         
         # Scale inputs at test time so that the model gets the same expected sum
-        scaled_layer = scale_activations(deathrate)(layer)
+        scaled_layer = scale_activations(death_rate)(layer)
         
         # Add tensor to final inputs
         tmp_final_input = drop_path(gate)([drop_tensor, scaled_layer])
         final_inputs.append(tmp_final_input)
     
     
-    # Return all the layers added together
+    # Return all the selected layers added together
     return add(final_inputs)
 
     
@@ -215,7 +222,7 @@ def add_with_potential_drop_path(layers):
     
     
 def layer_into_spatial_and_channels(layer):
-    ''' Simple helper to get certain dimensions of a layer
+    ''' Simple helper to get certain dimensions of a layer.
     Args:
         layer: input keras tensor
         
@@ -239,11 +246,12 @@ def layer_into_spatial_and_channels(layer):
     
 def make_prev_match_cur_layer(ip_prev, desired_spatial_dimen, desired_channels, 
                 weight_decay=DEFAULT_WEIGHT_DECAY):
-    ''' Simple helper to ensure that both hidden layer inputs have the same dimensions
+    ''' Simple helper to ensure that both hidden layer inputs have the same dimensions.
     Args:
         ip_prev: tuple of input keras tensor from previous block and flag for input image
         desired_spatial_dimen: output spatial dimensions
         desired_channels: output channels dimensions
+        weight_decay: weight decay factor
         
     Returns: keras tensor output (with either the original or new/adjusted "prev" layer)
     '''
@@ -296,7 +304,7 @@ def make_prev_match_cur_layer(ip_prev, desired_spatial_dimen, desired_channels,
 
     
 def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DECAY):
-    ''' Apply a series of operations to output of last two blocks
+    ''' Apply a series of operations to output of last two blocks as main conv "cell".
     Args:
         ip_prev: tuple of input keras tensor from previous block and flag for input image
         ip_cur: tuple of input keras tensor from current block and flag for input image
@@ -408,7 +416,7 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     
     
 def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DECAY):
-    ''' Apply a series of operations to output of last two blocks
+    ''' Apply operations to the output of last two blocks to reduce spatial and increase channels.
     Args:
         ip_prev: tuple of input keras tensor from previous block and flag for input image
         ip_cur: tuple of input keras tensor from current block and flag for input image
@@ -639,7 +647,7 @@ if __name__ == '__main__':
     model = NASNet(x_train.shape[1:], init_filters=64)
     model.summary()
     
-    init_lr_val = 0.1
+    init_lr_val = 0.15
     model.compile(loss='categorical_crossentropy',
                         optimizer=SGD(lr=init_lr_val), 
                         metrics=['accuracy', metrics.top_k_categorical_accuracy])        
@@ -751,6 +759,7 @@ if __name__ == '__main__':
                     initial_epoch=0,
                     callbacks=callbacks,
                     validation_data=(x_test, y_test))
+               
                
     # Print metrics                
     print(model.metrics_names)
