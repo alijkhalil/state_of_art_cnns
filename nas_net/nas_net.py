@@ -46,7 +46,7 @@ from keras.applications.imagenet_utils import _obtain_input_shape
 
 
 USE_DROPPATH=True
-DEFAULT_DEATH_RATE=0.2
+DEFAULT_DEATH_RATE=0.25
 
 ELEMENTS_PER_COMBINATION=2
 COMBINATIONS_PER_LAYER=5
@@ -54,7 +54,7 @@ COMBINATIONS_PER_LAYER=5
 DEFAULT_NUM_REDUCTION=2
 DEFAULT_NUM_REPEAT_VALUE=3
 DEFAULT_INIT_FILTERS=96
-DEFAULT_DROPOUT_RATE=0.1
+DEFAULT_DROPOUT_RATE=0.15
 DEFAULT_WEIGHT_DECAY=1E-4
 DEFAULT_NUM_CLASSES=100
 
@@ -73,6 +73,14 @@ def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION,
         an optional dropout is added to the final layer.  Aside from that, it is 
         very similar to the orginal construct.
 
+        # Note
+            If NAS Net is created with drop paths, the user must remember to use
+            the "DynamicDropPathGates" Callback so that different paths are randomly
+            closed (e.g. set to 0) for each mini-batch of training.  Also, in the 
+            event that the model weights are saved, the gate must be reset to correct 
+            death_rate value before using the model again (using the "set_up_death_rates" 
+            function).
+        
         # Arguments
             input_shape: optional shape tuple, only to be specified
                 if `include_top` is False (otherwise the input shape
@@ -185,7 +193,6 @@ def add_with_potential_drop_path_helper(layers, drop_table):
         death_rate = drop_vars["death_rate"]
         
         # Make copy of original layer with all zeros (for drop path)
-        clear_path = K.zeros_like(layer)
         drop_tensor = zero_out_path()(layer)
         
         # Scale inputs at test time so that the model gets the same expected sum
@@ -781,50 +788,37 @@ if __name__ == '__main__':
     
     
     # Set up increasing Dropout callback
-    general_dropout_rate = DEFAULT_DROPOUT_RATE
-    
-    if general_dropout_rate < 0.4:
-        init_dropout = general_dropout_rate * 0.5
-        range_val = general_dropout_rate * 0.75
-        
-    elif general_dropout_rate < 0.7:
-        init_dropout = general_dropout_rate - 0.2
-        range_val = 0.3
-        
-    else:
-        init_dropout = general_dropout_rate - range_val
-        range_val = 0.2
+    final_dropout = DEFAULT_DROPOUT_RATE
         
     class DynamicDropoutWeights(Callback):
-        def __init__(self, init_dropout, range, total_epochs):
+        def __init__(self, final_dropout):
             super(DynamicDropoutWeights, self).__init__()
-            self.init_dropout = init_dropout
-            self.step = float(range / total_epochs)
-            
-        def on_epoch_begin(self, epoch, logs={}):				
-            dropout_layer = self.model.get_layer("final_dropout")
-            dropout_layer.rate = self.init_dropout + (epoch * self.step)
 
-    callbacks.append(DynamicDropoutWeights(init_dropout, range_val, num_epochs))
+            if final_dropout < 0.3:
+                range_val = final_dropout * 0.375
+            elif final_dropout < 0.6:
+                range_val = 0.175
+            else:
+                range_val = 0.25    
+             
+            self.init_dropout = final_dropout - range_val 
+            self.range = range_val
+            
+        def on_epoch_begin(self, epoch, logs={}):
+            # At start of every epoch, slowly increase dropout towards final value
+            step_size = float(self.range / self.params["epochs"])
+            
+            dropout_layer = self.model.get_layer("final_dropout")
+            dropout_layer.rate = self.init_dropout + ((epoch + 1) * step_size)
+
+    callbacks.append(DynamicDropoutWeights(final_dropout))
             
             
     # Set up Drop Path callback
     if USE_DROPPATH:
-        general_dr = DEFAULT_DEATH_RATE
-        
-        if general_dr < 0.4:
-            init_dr = general_dr * 0.675
-            range_val = general_dr * 0.5
-            
-        elif general_dr < 0.7:
-            init_dr = general_dr - 0.1
-            range_val = 0.15
-            
-        else:
-            init_dr = general_dr - range_val
-            range_val = 0.2
-            
-        def set_up_death_rates(cur_dt, cur_death_rate):
+        final_dr = DEFAULT_DEATH_RATE
+                    
+        def set_up_death_rates(cur_dt, desired_death_rate):
             total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
             total_NAS_cells = float(len(cur_dt) / total_elements_per_NAS_cell)
         
@@ -832,36 +826,48 @@ if __name__ == '__main__':
                 cur_layer = int(i // total_elements_per_NAS_cell)
                 portion_of_dr = float(cur_layer) / total_NAS_cells
                 
-                K.set_value(tb["death_rate"], (cur_death_rate * portion_of_dr))
-
+                K.set_value(tb["death_rate"], (desired_death_rate * portion_of_dr))
+            
         class DynamicDropPathGates(Callback):
-            def __init__(self, cur_dt, init_death_rate, range, total_epochs):
+            def __init__(self, final_death_rate, cur_dt, update_freq=1):
                 super(DynamicDropPathGates, self).__init__()
-                self.dt = cur_dt
-                self.init_death_rate = init_death_rate
-                self.step = float(range / total_epochs)
                 
-                self.cur_death_rate = self.init_death_rate
-                set_up_death_rates(self.dt, self.cur_death_rate)
+                self.dt = cur_dt
+                self.update_freq = update_freq
+                
+                if final_death_rate < 0.3:
+                    range_val = final_death_rate * 0.375
+                elif final_death_rate < 0.6:
+                    range_val = 0.175
+                else:
+                    range_val = 0.25
+
+                self.init_death_rate = final_death_rate - range_val
+                self.range = range_val
 
             def on_epoch_begin(self, epoch, logs={}):
                 # Update death rates
-                self.cur_death_rate = self.init_death_rate + (epoch * self.step)   
+                step_size = float(self.range / self.params["epochs"])
+                
+                self.cur_death_rate = self.init_death_rate + ((epoch + 1) * step_size)
                 set_up_death_rates(self.dt, self.cur_death_rate)
                 
             def on_batch_begin(self, batch, logs={}):
-                # Randomly close some gates at start of every batch
-                rands = np.random.uniform(size=len(self.dt))
-                for tb, rand in zip(self.dt, rands):
-                    if rand < K.get_value(tb["death_rate"]):
-                        K.set_value(tb["gate"], 0)
+                # Randomly close some gates at start of every 'update_freq' batch
+                if batch % self.update_freq == 0:
+                    rands = np.random.uniform(size=len(self.dt))
+                    for tb, rand in zip(self.dt, rands):
+                        if rand < K.get_value(tb["death_rate"]):
+                            K.set_value(tb["gate"], 0)
 
             def on_batch_end(self, batch, logs={}):
-                # Re-open all gates at the end of the batch
-                for tb in self.dt:
-                    K.set_value(tb["gate"], 1) 
+                # Re-open all gates at the end of every 'update_freq' batches
+                total_steps = (self.params["steps"] - 1)
+                if (batch % self.update_freq == 0 or batch >= total_steps):
+                    for tb in self.dt:
+                        K.set_value(tb["gate"], 1)
                 
-        callbacks.append(DynamicDropPathGates(drop_table, init_dr, range_val, num_epochs))
+        callbacks.append(DynamicDropPathGates(final_dr, drop_table, update_freq=4))
     
     
     # Conduct training

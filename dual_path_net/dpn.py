@@ -479,31 +479,30 @@ if __name__ == '__main__':
     
     
     # Set up increasing Dropout callback
-    general_dropout_rate = DEFAULT_DROPOUT_RATE
-    
-    if general_dropout_rate < 0.4:
-        init_dropout = general_dropout_rate * 0.375
-        range_val = general_dropout_rate * 0.75
-        
-    elif general_dropout_rate < 0.7:
-        init_dropout = general_dropout_rate - 0.2
-        range_val = 0.3
-        
-    else:
-        init_dropout = general_dropout_rate - range_val
-        range_val = 0.2
+    final_dropout = DEFAULT_DROPOUT_RATE
         
     class DynamicDropoutWeights(Callback):
-        def __init__(self, init_dropout, range, total_epochs):
+        def __init__(self, final_dropout):
             super(DynamicDropoutWeights, self).__init__()
-            self.init_dropout = init_dropout
-            self.step = float(range / total_epochs)
-            
-        def on_epoch_begin(self, epoch, logs={}):				
-            dropout_layer = self.model.get_layer("final_dropout")
-            dropout_layer.rate = self.init_dropout + (epoch * self.step)
 
-    callbacks.append(DynamicDropoutWeights(init_dropout, range_val, num_epochs))
+            if final_dropout < 0.3:
+                range_val = final_dropout * 0.375
+            elif final_dropout < 0.6:
+                range_val = 0.175
+            else:
+                range_val = 0.25
+             
+            self.init_dropout = final_dropout - range_val 
+            self.range = range_val
+            
+        def on_epoch_begin(self, epoch, logs={}):
+            # At start of every epoch, slowly increase dropout towards final value
+            step_size = float(self.range / self.params["epochs"])
+            
+            dropout_layer = self.model.get_layer("final_dropout")
+            dropout_layer.rate = self.init_dropout + ((epoch + 1) * step_size)
+
+    callbacks.append(DynamicDropoutWeights(final_dropout))
             
             
     # Initialize model and conduct training
