@@ -45,9 +45,8 @@ from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
 
 
-drop_table = []
 USE_DROPPATH=True
-DEFAULT_DEATH_RATE=0.25
+DEFAULT_DEATH_RATE=0.2
 
 ELEMENTS_PER_COMBINATION=2
 COMBINATIONS_PER_LAYER=5
@@ -63,9 +62,9 @@ DEFAULT_NUM_CLASSES=100
 
 def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION, 
 				repeat_val=DEFAULT_NUM_REPEAT_VALUE, init_filters=DEFAULT_INIT_FILTERS, 
-                dropout_rate=DEFAULT_DROPOUT_RATE, weight_decay=DEFAULT_WEIGHT_DECAY, 
-                include_top=True, input_tensor=None, classes=DEFAULT_NUM_CLASSES, 
-                activation='softmax'):
+                use_droppath=USE_DROPPATH, dropout_rate=DEFAULT_DROPOUT_RATE, 
+                weight_decay=DEFAULT_WEIGHT_DECAY, include_top=True, input_tensor=None, 
+                classes=DEFAULT_NUM_CLASSES, activation='softmax'):
                 
     '''Instantiate a slight modification of the Dual Path Network architecture.
         The main tenants are the same, but some liberities were taken to combine 
@@ -86,7 +85,8 @@ def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION,
             repeat_val: number of normal NAS convolutional cells surrounding the reduction cells
             init_filters: initial number of filters
                 Should be 128 unless the model is extremely small or large
-            final_dropout_rate: dropout rate of final layer
+            use_droppath: whether to use drop paths throughout the NASNet (requires use of DropPath callback too)
+            dropout_rate: dropout rate of final layer
             weight_decay: weight decay factor
             include_top: whether to include the fully-connected
                 layer at the top of the network.
@@ -123,8 +123,8 @@ def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION,
         else:
             img_input = input_tensor
 
-    x = __create_nas_cell_net(classes, img_input, include_top, init_filters,
-                                num_reduction_cells, repeat_val, 
+    x, drop_table = __create_nas_cell_net(classes, img_input, include_top, init_filters,
+                                num_reduction_cells, repeat_val, use_droppath, 
                                 dropout_rate, weight_decay, activation)
 
     # Ensure that the model takes into account any potential predecessors of `input_tensor`.
@@ -137,7 +137,7 @@ def NASNet(input_shape=None, num_reduction_cells=DEFAULT_NUM_REDUCTION,
     model = Model(inputs, x, name='nas_net')
 
     
-    return model
+    return model, drop_table
 
  
 # Layer for dropping path based on a "gate" variable   
@@ -166,27 +166,24 @@ def zero_out_path():
     return Lambda(func)
     
 
-def add_with_potential_drop_path_helper(layers):    
+def add_with_potential_drop_path_helper(layers, drop_table):    
     ''' Perform add operation with possibility of dropping out (e.g. excluding) every layer
     Args:
         layers: list of keras layer tensor to add together
+        drop_table: table with gate and death_rate values
         
     Returns: keras tensor output after operation
     '''
-
-    # Get global table with drop gates and rates
-    global drop_table
 
     # Add gate variables and their drop rates to a global table
     final_inputs = []
 
     # Go through each layer and dropout based on gate value
-    for layer in layers:
-        # Add death_rate and drop gate variable to a global table
-        death_rate = K.variable(DEFAULT_DEATH_RATE)
-        gate = K.variable(1, dtype='uint16')    
-        drop_table.append({"death_rate": death_rate, "gate": gate})
-                
+    for layer, drop_vars in zip(layers, drop_table):
+        # Get death_rate and drop gate variables from table
+        gate = drop_vars["gate"]
+        death_rate = drop_vars["death_rate"]
+        
         # Make copy of original layer with all zeros (for drop path)
         clear_path = K.zeros_like(layer)
         drop_tensor = zero_out_path()(layer)
@@ -195,26 +192,27 @@ def add_with_potential_drop_path_helper(layers):
         scaled_layer = scale_activations(death_rate)(layer)
         
         # Add tensor to final inputs
-        tmp_final_input = drop_path(gate)([drop_tensor, scaled_layer])
-        final_inputs.append(tmp_final_input)
+        final_inputs.append(drop_path(gate)([drop_tensor, scaled_layer]))
     
     
     # Return all the selected layers added together
     return add(final_inputs)
 
     
-def add_with_potential_drop_path(layers):
+def add_with_potential_drop_path(layers, drop_table):
     ''' Addition wrapper.  Can be either normal add or one with drop path.
     Args:
         layers: list of keras layer tensor to add together
+        drop_table: table with gate and death_rate values
         
     Returns: keras tensor output after operation
     '''
-    # Condition on USE_DROPPATH flag
-    if USE_DROPPATH:
-        ret_layer = add_with_potential_drop_path_helper(layers)
-    else:
+    
+    # Condition on whether drop_table actually in use
+    if drop_table[0] is None:
         ret_layer = add(layers)
+    else:
+        ret_layer = add_with_potential_drop_path_helper(layers, drop_table)
     
 
     # Return final layer
@@ -228,6 +226,7 @@ def layer_into_spatial_and_channels(layer):
         
     Returns: tuple of spatial dimension and number of channels in layer
     '''
+    
     # Get height/width and channel axis
     height_or_width_dimension = 2
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
@@ -303,12 +302,13 @@ def make_prev_match_cur_layer(ip_prev, desired_spatial_dimen, desired_channels,
     return (prev_layer, cur_input_image_val)
 
     
-def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DECAY):
+def __normal_nas_cell(ip_prev, ip_cur, nb_filter, drop_table, weight_decay=DEFAULT_WEIGHT_DECAY):
     ''' Apply a series of operations to output of last two blocks as main conv "cell".
     Args:
         ip_prev: tuple of input keras tensor from previous block and flag for input image
         ip_cur: tuple of input keras tensor from current block and flag for input image
         nb_filter: final number of filters to output
+        drop_table: table with gates values for drop_path
         weight_decay: weight decay factor
         
     Returns: keras tensor output (with same number of channels as input)
@@ -316,6 +316,12 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
 
     # Get axis for channels
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
+    
+    
+    # Initialize general variables
+    start_i = 0
+    end_i = ELEMENTS_PER_COMBINATION
+    total_combos = 0
     
     
     # Get RELU altered activations
@@ -355,7 +361,14 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     hid1_0 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid1_0)
                            
-    hid1 = add_with_potential_drop_path([cur_layer_alt, hid1_0])
+    input_layers = [cur_layer_alt, hid1_0]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+    
+    hid1 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION
+    total_combos += 1
     
     
     # Hidden sub-block 2
@@ -367,7 +380,14 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     hid2_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid2_1)
 
-    hid2 = add_with_potential_drop_path([hid2_0, hid2_1])
+    input_layers = [hid2_0, hid2_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid2 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION
+    total_combos += 1
     
     
     # Hidden sub-block 3
@@ -375,8 +395,15 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     hid3_0 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid3_0)
                            
-    hid3 = add_with_potential_drop_path([prev_layer_alt, hid3_0])
-
+    input_layers = [prev_layer_alt, hid3_0]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid3 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION
+    total_combos += 1
+    
     
     # Hidden sub-block 4
     hid4_average = AveragePooling2D((3, 3), strides=(1,1), padding='same')(ip_prev_plus_relu_alt)
@@ -386,7 +413,14 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     hid4_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid4_average)    
 
-    hid4 = add_with_potential_drop_path([hid4_0, hid4_1])                           
+    input_layers = [hid4_0, hid4_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid4 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
     
     
     # Hidden sub-block 5
@@ -398,10 +432,18 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     hid5_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid5_1)
     
-    hid5 = add_with_potential_drop_path([hid5_0, hid5_1])
+    input_layers = [hid5_0, hid5_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+    
+    hid5 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
     
     
     # Concatenate sub-blocks and scale them down
+    assert (total_combos == COMBINATIONS_PER_LAYER)
     output = concatenate([hid1, hid2, hid3, hid4, hid5], axis=concat_axis)
     
     output = Activation('relu')(output)
@@ -415,12 +457,13 @@ def __normal_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DE
     return (output, False)
     
     
-def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT_DECAY):
+def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, drop_table, weight_decay=DEFAULT_WEIGHT_DECAY):
     ''' Apply operations to the output of last two blocks to reduce spatial and increase channels.
     Args:
         ip_prev: tuple of input keras tensor from previous block and flag for input image
         ip_cur: tuple of input keras tensor from current block and flag for input image
         nb_filter: final number of filters to output
+        drop_table: table with gates values for drop_path
         weight_decay: weight decay factor
         
     Returns: keras tensor output (with half the spatial dimensions but double the channels)
@@ -428,6 +471,12 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
 
     # Get axis for channels
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
+
+
+    # Initialize general variables
+    start_i = 0
+    end_i = ELEMENTS_PER_COMBINATION
+    total_combos = 0
 
     
     # Get RELU altered activations
@@ -461,7 +510,14 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
     hid1_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid1_sep_7)
                            
-    hid1 = add_with_potential_drop_path([hid1_0, hid1_1])
+    input_layers = [hid1_0, hid1_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid1 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1          
     
     
     # Hidden sub-block 2
@@ -472,7 +528,14 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
     hid2_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid1_sep_7)
                            
-    hid2 = add_with_potential_drop_path([hid2_0, hid2_1])
+    input_layers = [hid2_0, hid2_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid2 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
     
     
     # Hidden sub-block 3
@@ -485,8 +548,15 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
     hid3_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid3_1)
            
-    hid3 = add_with_potential_drop_path([hid3_0, hid3_1])
-
+    input_layers = [hid3_0, hid3_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid3 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
+    
     
     # Hidden sub-block 4
     hid4_0 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
@@ -497,7 +567,14 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
     hid4_1 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid4_1)                          
            
-    hid4 = add_with_potential_drop_path([hid4_0, hid4_1])
+    input_layers = [hid4_0, hid4_1]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid4 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
     
     
     # Hidden sub-block 5
@@ -505,10 +582,18 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
     hid5_0 = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
                            beta_regularizer=l2(weight_decay))(hid5_0)
 
-    hid5 = add_with_potential_drop_path([hid2, hid5_0])
+    input_layers = [hid2, hid5_0]
+    assert (len(input_layers) == ELEMENTS_PER_COMBINATION)
+                           
+    hid5 = add_with_potential_drop_path(input_layers, drop_table[start_i:end_i]) 
+    
+    start_i += ELEMENTS_PER_COMBINATION
+    end_i += ELEMENTS_PER_COMBINATION                           
+    total_combos += 1
     
     
     # Concatenate sub-blocks and scale them down
+    assert (total_combos == COMBINATIONS_PER_LAYER)
     output = concatenate([hid3, hid4, hid5], axis=concat_axis)
     
     output = Activation('relu')(output)
@@ -524,8 +609,8 @@ def __reduction_nas_cell(ip_prev, ip_cur, nb_filter, weight_decay=DEFAULT_WEIGHT
                                 
 def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAULT_INIT_FILTERS, 
                         num_reduction_cells=DEFAULT_NUM_REDUCTION, repeat_val=DEFAULT_NUM_REPEAT_VALUE,
-                        dropout_rate=DEFAULT_DROPOUT_RATE, weight_decay=DEFAULT_WEIGHT_DECAY, 
-                        activation='softmax'):
+                        use_droppath=USE_DROPPATH, dropout_rate=DEFAULT_DROPOUT_RATE, 
+                        weight_decay=DEFAULT_WEIGHT_DECAY, activation='softmax'):
     ''' Build the NAS Cell model
     Args:
         nb_classes: number of classes
@@ -546,7 +631,27 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
     
     
-    # Begin the process of Normal NAS Cell and Reduction NAS cell sequences
+    # Create drop table
+    total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
+    total_cells = num_reduction_cells + ((num_reduction_cells + 1) * repeat_val)
+    total_elements = total_cells * total_elements_per_NAS_cell
+    
+    if use_droppath:
+        drop_table = []
+        
+        for _ in range(total_elements):
+            death_rate = K.variable(DEFAULT_DEATH_RATE)
+            gate = K.variable(1, dtype='uint16')    
+            drop_table.append({"death_rate": death_rate, "gate": gate})
+            
+    else:
+        drop_table = [None] * total_elements    
+
+        
+    # Begin the process of Normal NAS Cell and Reduction NAS cell sequences        
+    dt_start = 0
+    dt_end = total_elements_per_NAS_cell    
+
     cur_hid = (img_input, True)
     prev_hid = (img_input, True)
     
@@ -558,8 +663,12 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
             prev_hid = make_prev_match_cur_layer(prev_hid, cur_spatial, cur_channels)
 
             tmp_prev_hid = cur_hid            
-            cur_hid = __normal_nas_cell(prev_hid, cur_hid, num_channels, weight_decay)
+            cur_hid = __normal_nas_cell(prev_hid, cur_hid, num_channels, 
+                                                drop_table[dt_start:dt_end], weight_decay)
             prev_hid = tmp_prev_hid
+            
+            dt_start += total_elements_per_NAS_cell
+            dt_end += total_elements_per_NAS_cell
 
         # Double number of channels and pass through reduction cell
         num_channels *= 2
@@ -568,10 +677,14 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
             prev_hid = make_prev_match_cur_layer(prev_hid, cur_spatial, cur_channels)
 
             tmp_prev_hid = cur_hid            
-            cur_hid = __reduction_nas_cell(prev_hid, cur_hid, num_channels, weight_decay)
+            cur_hid = __reduction_nas_cell(prev_hid, cur_hid, num_channels, 
+                                                drop_table[dt_start:dt_end], weight_decay)
             prev_hid = tmp_prev_hid
             
-    
+            dt_start += total_elements_per_NAS_cell
+            dt_end += total_elements_per_NAS_cell
+            
+            
     # Average pool, apply dropout (if desired), and apply final FC layer
     x = cur_hid[0]
     
@@ -588,8 +701,8 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
                         bias_regularizer=l2(weight_decay))(x)
 
                         
-    # Return classification logits                    
-    return x
+    # Return classification logits and drop table                 
+    return x, drop_table
     
     
 	
@@ -644,7 +757,7 @@ if __name__ == '__main__':
     
     
     # Initialize model
-    model = NASNet(x_train.shape[1:], init_filters=64)
+    model, drop_table = NASNet(x_train.shape[1:], init_filters=64)
     model.summary()
     
     init_lr_val = 0.15
@@ -654,7 +767,7 @@ if __name__ == '__main__':
     
     
     # Set up cosine annealing LR schedule callback
-    num_epochs = 75
+    num_epochs = 125
 
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):
         def variable_epochs_cos_scheduler_helper(cur_epoch):
@@ -700,54 +813,55 @@ if __name__ == '__main__':
         general_dr = DEFAULT_DEATH_RATE
         
         if general_dr < 0.4:
-            init_dr = general_dr * 0.5
-            range_val = general_dr * 0.75
+            init_dr = general_dr * 0.675
+            range_val = general_dr * 0.5
             
         elif general_dr < 0.7:
-            init_dr = general_dr - 0.15
-            range_val = 0.2
+            init_dr = general_dr - 0.1
+            range_val = 0.15
             
         else:
             init_dr = general_dr - range_val
             range_val = 0.2
             
-        def set_up_death_rates(cur_death_rate):
+        def set_up_death_rates(cur_dt, cur_death_rate):
             total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
-            total_NAS_cells = float(len(drop_table) / total_elements_per_NAS_cell)
+            total_NAS_cells = float(len(cur_dt) / total_elements_per_NAS_cell)
         
-            for i, tb in enumerate(drop_table, start=total_elements_per_NAS_cell):
+            for i, tb in enumerate(cur_dt, start=total_elements_per_NAS_cell):
                 cur_layer = int(i // total_elements_per_NAS_cell)
                 portion_of_dr = float(cur_layer) / total_NAS_cells
                 
                 K.set_value(tb["death_rate"], (cur_death_rate * portion_of_dr))
 
         class DynamicDropPathGates(Callback):
-            def __init__(self, init_death_rate, range, total_epochs):
+            def __init__(self, cur_dt, init_death_rate, range, total_epochs):
                 super(DynamicDropPathGates, self).__init__()
+                self.dt = cur_dt
                 self.init_death_rate = init_death_rate
                 self.step = float(range / total_epochs)
                 
                 self.cur_death_rate = self.init_death_rate
-                set_up_death_rates(self.cur_death_rate)
+                set_up_death_rates(self.dt, self.cur_death_rate)
 
             def on_epoch_begin(self, epoch, logs={}):
                 # Update death rates
                 self.cur_death_rate = self.init_death_rate + (epoch * self.step)   
-                set_up_death_rates(self.cur_death_rate)
+                set_up_death_rates(self.dt, self.cur_death_rate)
                 
             def on_batch_begin(self, batch, logs={}):
                 # Randomly close some gates at start of every batch
-                rands = np.random.uniform(size=len(drop_table))
-                for tb, rand in zip(drop_table, rands):
+                rands = np.random.uniform(size=len(self.dt))
+                for tb, rand in zip(self.dt, rands):
                     if rand < K.get_value(tb["death_rate"]):
                         K.set_value(tb["gate"], 0)
 
             def on_batch_end(self, batch, logs={}):
                 # Re-open all gates at the end of the batch
-                for tb in drop_table:
+                for tb in self.dt:
                     K.set_value(tb["gate"], 1) 
                 
-        callbacks.append(DynamicDropPathGates(init_dr, range_val, num_epochs))
+        callbacks.append(DynamicDropPathGates(drop_table, init_dr, range_val, num_epochs))
     
     
     # Conduct training
