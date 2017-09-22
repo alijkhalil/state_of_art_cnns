@@ -44,20 +44,23 @@ from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
 
 
-DEFAULT_DEPTH=54
+USE_DROPPATH=True
+DEFAULT_DEATH_RATE=0.15
+
+DEFAULT_DEPTH=58
 DEFAULT_NUM_BLOCKS=3
-DEFAULT_INIT_FILTERS=112
-DEFAULT_LAYERS_PER_BLOCK=[14, 24, 12]
-DEFAULT_DROPOUT_RATE=0.25
+DEFAULT_INIT_FILTERS=128
+DEFAULT_LAYERS_PER_BLOCK=[12, 32, 10]
+DEFAULT_DROPOUT_RATE=0.15
 DEFAULT_WEIGHT_DECAY=1E-4
 DEFAULT_NUM_CLASSES=100
 
 
 def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAULT_NUM_BLOCKS, 
                 init_filters=DEFAULT_INIT_FILTERS, nb_layers_per_block=DEFAULT_LAYERS_PER_BLOCK, 
-                dropout_rate=DEFAULT_DROPOUT_RATE, weight_decay=DEFAULT_WEIGHT_DECAY, 
-                include_top=True, input_tensor=None, classes=DEFAULT_NUM_CLASSES, 
-                activation='softmax'):
+                use_droppath=USE_DROPPATH, dropout_rate=DEFAULT_DROPOUT_RATE, 
+                weight_decay=DEFAULT_WEIGHT_DECAY, include_top=True, input_tensor=None, 
+                classes=DEFAULT_NUM_CLASSES, activation='softmax'):
                 
     '''Instantiate a slight modification of the Dual Path Network architecture.
         The main tenants are the same, but some liberities were taken to combine 
@@ -75,7 +78,7 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
                 and width and height should be no smaller than 8.
                 E.g. `(200, 200, 3)` would be one valid value.
             depth: number or layers in the DPN
-            nb_dense_block: number of DPN blocks as basic building blocks of the model (generally = 4 or 5)
+            nb_dense_block: number of DPN blocks as basic building blocks of the model (generally 3 to 5)
             growth_rate: number of filters to add per layher block in "dense" path
             init_filters: initial number of filters
                 Should be 128 unless the model is extremely small or large
@@ -121,7 +124,7 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
         else:
             img_input = input_tensor
 
-    x = __create_dual_path_net(classes, img_input, include_top, depth, nb_dense_block,
+    x, drop_table = __create_dual_path_net(classes, img_input, include_top, depth, nb_dense_block,
                            init_filters, nb_layers_per_block, dropout_rate, 
                            weight_decay, activation)
 
@@ -135,7 +138,7 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
     model = Model(inputs, x, name='dpn_net')
 
     
-    return model
+    return model, drop_table
 
 
 def __conv_block(ip, nb_filter, smaller_filters=False, weight_decay=DEFAULT_WEIGHT_DECAY):
@@ -248,15 +251,57 @@ def crop(dimension, start, end=0):
 			
     return Lambda(func)
 
+
+# Layer for scaling down activations at test time
+def scale_activations(drop_rate):
+    def func(x, drop_rate=drop_rate):
+        scale = K.ones_like(x) - drop_rate
+        return K.in_test_phase(scale * x, x)
     
-def __dpn_block(x, nb_layers, nb_filter, growth_rate, smaller_filters=False, 
-                    weight_decay=DEFAULT_WEIGHT_DECAY):
+    return Lambda(func)
+
+
+# Layer for dropping path based on a "gate" variable
+#   Input should be formatted: [drop_path, normal_path] 
+#   "Gate" variable should be set to 1 to return "normal_path"
+def drop_path(gate):
+    def func(tensors, gate=gate):
+        return K.switch(gate, tensors[1], tensors[0])
+			
+    return Lambda(func)      
+    
+# Wrapper for add combination layer (with drop path functionality incorporated)
+def res_add(layers, drop_dict):
+    if drop_dict is not None:
+        # Get death_rate and drop gate variables from table
+        gate = drop_dict["gate"]
+        death_rate = drop_dict["death_rate"]
+
+        # Get main and scaled (during test time) residual channels
+        main_channels, res_channels = layers
+        res_scaled = scale_activations(death_rate)(res_channels)
+
+        # Add scaled value only if gate is open, otherwise keep untouched
+        non_drop_path = add([main_channels, res_scaled])        
+        ret_layer = drop_path(gate)([main_channels, non_drop_path])        
+        
+    else:
+        ret_layer = add(layers)
+        
+    
+    # Return final layer
+    return ret_layer
+    
+    
+def __dpn_block(x, nb_layers, nb_filter, growth_rate, drop_table,
+                    smaller_filters=False, weight_decay=DEFAULT_WEIGHT_DECAY):
     ''' Build a dense_block where the output of each conv_block is fed to subsequent ones
             Args:
                 x: keras tensor
                 nb_layers: the number of layers of conv_block to append to the model
                 nb_filter: current number of residual_filters
                 growth_rate: growth rate
+                drop_table: table with death_rate and gate values for drop_paths
                 smaller_filters: flag for using smaller filters later in the network
                 weight_decay: weight decay factor
                 
@@ -271,10 +316,10 @@ def __dpn_block(x, nb_layers, nb_filter, growth_rate, smaller_filters=False,
         cb_dense = crop(concat_axis, nb_filter)(cb)
         
         if i == 0:
-            total_res = add([x, cb_res])
+            total_res = res_add([x, cb_res], drop_table[i])
             total_dense = cb_dense
         else:
-            total_res = add([total_res, cb_res])
+            total_res = res_add([total_res, cb_res], drop_table[i])
             total_dense = concatenate([total_dense, cb_dense], axis=concat_axis)
 
         x = concatenate([total_res, total_dense], axis=concat_axis)
@@ -336,6 +381,21 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
         nb_layers = [nb_layers_per_block] * nb_dense_block
 
         
+    # Create drop table
+    total_residuals = np.sum(np.array(nb_layers))
+    
+    if use_droppath:
+        drop_table = []
+        
+        for _ in range(total_residuals):
+            death_rate = K.variable(DEFAULT_DEATH_RATE)
+            gate = K.variable(1, dtype='uint16')    
+            drop_table.append({"death_rate": death_rate, "gate": gate})
+            
+    else:
+        drop_table = [None] * total_residuals    
+
+        
     # Initial convolution
     x = Conv2D(init_filters, (3, 3), kernel_initializer='he_uniform', 
                 padding='same', name='initial_conv2D',
@@ -352,23 +412,43 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
     # Add dense blocks
     prev_activations = None    
     
+    dt_start = 0
+    dt_end = nb_layers[0]        
+    
     for block_idx in range(nb_dense_block):
-        # Get next block residuals and dyanamically generate growth rate
-        if init_filters <= 512:
+        # Get next block residuals
+        if init_filters <= 256:        
             next_filters = int(2 * init_filters)
-        elif init_filters <= 1280:
+        elif init_filters <= 512:
+            next_filters = int(1.75 * init_filters)
+        elif init_filters <= 1024:
             next_filters = int(1.5 * init_filters)
-        elif init_filters <= 2048:
+        elif init_filters <= 1536:
             next_filters = int(1.25 * init_filters)
     
-        if block_idx < (nb_dense_block - 1):
-            growth_rate = 2.5
+        # Figure out appropriate growth rate
+        filter_diff = next_filters - init_filters
+        if block_idx == 0 or block_idx == (nb_dense_block - 1):
+            growth_rate = 1.5
         else:
-            growth_rate = 1.25
-    
-        growth_channels = int(growth_rate * (next_filters - init_filters) // nb_layers[block_idx])
+            growth_rate = 2
+            
+        growth_channels = int((growth_rate * filter_diff) // nb_layers[block_idx])
         
-        # Ensure that spatial area isn't too small for 5x5 conv
+        channel_min_limit = (filter_diff * 0.05) 
+        if channel_min_limit > 16:
+            channel_min_limit = 16
+            
+        channel_max_limit = (filter_diff * 0.125)
+        if channel_max_limit > 50:
+            channel_max_limit = 50
+        
+        if growth_channels > channel_max_limit:
+            growth_channels = int(channel_max_limit)
+        elif growth_channels < channel_min_limit:
+            growth_channels = int(channel_min_limit)
+            
+        # Ensure that embedding spatial area isn't too small for a 5x5 conv
         out_shape = K.int_shape(x)
         channel_dimen = concat_axis
         if concat_axis < 0:
@@ -383,10 +463,13 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
             smaller_filters = False
 
         # Get dense block            
-        x = __dpn_block(x, nb_layers[block_idx], init_filters, 
-                                        growth_channels, smaller_filters, 
+        x = __dpn_block(x, nb_layers[block_idx], init_filters, growth_channels, 
+                                        drop_table[dt_start:dt_end], smaller_filters, 
                                         weight_decay=weight_decay)
 		
+        dt_start += nb_layers[block_idx]
+        dt_end += nb_layers[block_idx]
+        
         # Add transition_block (for every block except the last one)
         if block_idx != (nb_dense_block-1):
             x = __transition_block(prev_activations, x, next_filters, weight_decay=weight_decay)
@@ -408,9 +491,8 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
                         bias_regularizer=l2(weight_decay))(x)
 
     
-    # Return final layer's logits
-    return x
-    
+    # Return classification logits and drop table                 
+    return x, drop_table    
     
 	
 
@@ -463,15 +545,29 @@ if __name__ == '__main__':
                                 zoom_range=0.15)
     
     
-    # Set up cosine annealing LR schedule callback
-    init_lr_val = 0.15
-    num_epochs = 75
+    # Initialize model
+    model, drop_table = DualPathNetwork(x_train.shape[1:], init_filters=80)
+    model.summary()
+    
+    init_lr_val = 0.125
+    model.compile(loss='categorical_crossentropy',
+                        optimizer=SGD(lr=init_lr_val), 
+                        metrics=['accuracy', metrics.top_k_categorical_accuracy])        
 
+                        
+    # Set up cosine annealing LR schedule callback
+    num_epochs = 100
+
+    def get_cosine_scaler(base_val, cur_iter, total_iter):
+        if cur_iter < total_iter:
+            return (0.5 * base_val * (math.cos(math.pi * 
+                            (cur_iter % total_iter) / total_iter) + 1))
+        else:
+            return 0
+            
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):
         def variable_epochs_cos_scheduler_helper(cur_epoch):
-            return (0.5 * init_lr * 
-                        (math.cos(math.pi * 
-                        (cur_epoch % total_epochs) / total_epochs) + 1))
+            return get_cosine_scaler(init_lr, cur_epoch, total_epochs)
             
         return variable_epochs_cos_scheduler_helper    
     
@@ -492,28 +588,96 @@ if __name__ == '__main__':
             else:
                 range_val = 0.25
              
-            self.init_dropout = final_dropout - range_val 
+            self.final_dropout = final_dropout 
             self.range = range_val
             
         def on_epoch_begin(self, epoch, logs={}):
-            # At start of every epoch, slowly increase dropout towards final value
-            step_size = float(self.range / self.params["epochs"])
-            
-            dropout_layer = self.model.get_layer("final_dropout")
-            dropout_layer.rate = self.init_dropout + ((epoch + 1) * step_size)
+            # At start of every epoch, slowly increase dropout towards final value                                                        
+            total_epoch = self.params["epochs"]
+            subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)            
+
+            dropout_layer = self.model.get_layer("final_dropout")            
+            dropout_layer.rate = (self.final_dropout - subtract_val)
 
     callbacks.append(DynamicDropoutWeights(final_dropout))
             
             
-    # Initialize model and conduct training
-    model = DualPathNetwork(x_train.shape[1:])
-    model.summary()
-    
-    model.compile(loss='categorical_crossentropy',
-                        optimizer=SGD(lr=init_lr_val), 
-                        metrics=['accuracy', metrics.top_k_categorical_accuracy])    
-    
-    batch_size = 48
+    # Set up Drop Path callback
+    if USE_DROPPATH:
+        final_dr = DEFAULT_DEATH_RATE
+        total_num_layers = int(np.sum(np.array(DEFAULT_LAYERS_PER_BLOCK)))
+        gates_per_layer = [1] * total_num_layers
+		
+        def set_up_death_rates(cur_dt, desired_death_rate, gates_p_layer):
+			# Convert 'gates_p_layer' list into running sum
+			orig = np.array(gates_p_layer)
+			new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
+			for i in range(len(orig)):
+				new_running_sum[i] = np.sum(orig[:i+1])
+				
+			# Get layer of gate and use it to calculate death_rate for layer
+			cur_sum_index = 0
+			total = new_running_sum[cur_sum_index]
+
+			cur_layer = 1
+			num_layers = len(gates_p_layer)
+			for i, tb in enumerate(cur_dt):
+				if i >= total:
+					cur_layer += 1
+					cur_sum_index += 1
+                    
+					total = new_running_sum[cur_sum_index]
+						
+                portion_of_dr = float(cur_layer) / num_layers
+                K.set_value(tb["death_rate"], (desired_death_rate * portion_of_dr))
+            
+        class DynamicDropPathGates(Callback):
+            def __init__(self, final_death_rate, cur_dt, gates_p_layer, update_freq=1):
+                super(DynamicDropPathGates, self).__init__()
+                
+                self.dt = cur_dt
+                self.gates_p_layer = gates_p_layer
+                self.update_freq = update_freq
+                
+                if final_death_rate < 0.3:
+                    range_val = final_death_rate * 0.375
+                elif final_death_rate < 0.6:
+                    range_val = 0.175
+                else:
+                    range_val = 0.25
+
+                self.final_death_rate = final_death_rate
+                self.range = range_val
+
+            def on_epoch_begin(self, epoch, logs={}):
+                # Update death rates
+                total_epoch = self.params["epochs"]
+                subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)
+                cur_death_rate = (self.final_death_rate - subtract_val)             
+                
+                set_up_death_rates(self.dt, cur_death_rate, self.gates_p_layer)
+                
+            def on_batch_begin(self, batch, logs={}):
+                # Randomly close some gates at start of every 'update_freq' batch
+                if batch % self.update_freq == 0:
+                    rands = np.random.uniform(size=len(self.dt))
+                    for tb, rand in zip(self.dt, rands):
+                        if rand < K.get_value(tb["death_rate"]):
+                            K.set_value(tb["gate"], 0)
+
+            def on_batch_end(self, batch, logs={}):
+                # Re-open all gates at the end of every 'update_freq' batches
+                total_steps = (self.params["steps"] - 1)
+                if (batch % self.update_freq == 0 or batch >= total_steps):
+                    for tb in self.dt:
+                        K.set_value(tb["gate"], 1)
+                
+        callbacks.append(DynamicDropPathGates(final_dr, drop_table, 
+                                                gates_per_layer, update_freq=4))    
+            
+            
+    # Conduct training
+    batch_size = 64
     hist = model.fit_generator(
                     global_image_aug.flow(x_train, y_train, batch_size=batch_size),
                     steps_per_epoch=(x_train.shape[0] // batch_size),

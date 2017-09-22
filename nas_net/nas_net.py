@@ -46,15 +46,15 @@ from keras.applications.imagenet_utils import _obtain_input_shape
 
 
 USE_DROPPATH=True
-DEFAULT_DEATH_RATE=0.25
+DEFAULT_DEATH_RATE=0.15
 
 ELEMENTS_PER_COMBINATION=2
 COMBINATIONS_PER_LAYER=5
 
 DEFAULT_NUM_REDUCTION=2
 DEFAULT_NUM_REPEAT_VALUE=3
-DEFAULT_INIT_FILTERS=96
-DEFAULT_DROPOUT_RATE=0.15
+DEFAULT_INIT_FILTERS=128
+DEFAULT_DROPOUT_RATE=0.1
 DEFAULT_WEIGHT_DECAY=1E-4
 DEFAULT_NUM_CLASSES=100
 
@@ -678,7 +678,7 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
             dt_end += total_elements_per_NAS_cell
 
         # Double number of channels and pass through reduction cell
-        num_channels *= 2
+        num_channels = int(num_channels * 2.75)
         if i < num_reduction_cells:
             cur_spatial, cur_channels = layer_into_spatial_and_channels(cur_hid[0])
             prev_hid = make_prev_match_cur_layer(prev_hid, cur_spatial, cur_channels)
@@ -764,10 +764,11 @@ if __name__ == '__main__':
     
     
     # Initialize model
-    model, drop_table = NASNet(x_train.shape[1:], init_filters=64)
+    #model, drop_table = NASNet(x_train.shape[1:], init_filters=40, repeat_val=3)
+    model, drop_table = NASNet(x_train.shape[1:], init_filters=36, repeat_val=4)
     model.summary()
     
-    init_lr_val = 0.15
+    init_lr_val = 0.125
     model.compile(loss='categorical_crossentropy',
                         optimizer=SGD(lr=init_lr_val), 
                         metrics=['accuracy', metrics.top_k_categorical_accuracy])        
@@ -776,11 +777,16 @@ if __name__ == '__main__':
     # Set up cosine annealing LR schedule callback
     num_epochs = 125
 
+    def get_cosine_scaler(base_val, cur_iter, total_iter):
+        if cur_iter < total_iter:
+            return (0.5 * base_val * (math.cos(math.pi * 
+                            (cur_iter % total_iter) / total_iter) + 1))
+        else:
+            return 0
+            
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):
         def variable_epochs_cos_scheduler_helper(cur_epoch):
-            return (0.5 * init_lr * 
-                        (math.cos(math.pi * 
-                        (cur_epoch % total_epochs) / total_epochs) + 1))
+            return get_cosine_scaler(init_lr, cur_epoch, total_epochs)
             
         return variable_epochs_cos_scheduler_helper    
     
@@ -799,17 +805,18 @@ if __name__ == '__main__':
             elif final_dropout < 0.6:
                 range_val = 0.175
             else:
-                range_val = 0.25    
+                range_val = 0.25
              
-            self.init_dropout = final_dropout - range_val 
+            self.final_dropout = final_dropout 
             self.range = range_val
             
         def on_epoch_begin(self, epoch, logs={}):
-            # At start of every epoch, slowly increase dropout towards final value
-            step_size = float(self.range / self.params["epochs"])
-            
-            dropout_layer = self.model.get_layer("final_dropout")
-            dropout_layer.rate = self.init_dropout + ((epoch + 1) * step_size)
+            # At start of every epoch, slowly increase dropout towards final value                                                        
+            total_epoch = self.params["epochs"]
+            subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)            
+
+            dropout_layer = self.model.get_layer("final_dropout")            
+            dropout_layer.rate = (self.final_dropout - subtract_val)
 
     callbacks.append(DynamicDropoutWeights(final_dropout))
             
@@ -817,22 +824,40 @@ if __name__ == '__main__':
     # Set up Drop Path callback
     if USE_DROPPATH:
         final_dr = DEFAULT_DEATH_RATE
-                    
-        def set_up_death_rates(cur_dt, desired_death_rate):
-            total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
-            total_NAS_cells = float(len(cur_dt) / total_elements_per_NAS_cell)
         
-            for i, tb in enumerate(cur_dt, start=total_elements_per_NAS_cell):
-                cur_layer = int(i // total_elements_per_NAS_cell)
-                portion_of_dr = float(cur_layer) / total_NAS_cells
-                
+        total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
+        total_NAS_cells = float(len(drop_table) / total_elements_per_NAS_cell)                    
+		gates_per_layer = [total_elements_per_NAS_cell] * total_NAS_cells
+		
+        def set_up_death_rates(cur_dt, desired_death_rate, gates_p_layer):
+			# Convert 'gates_p_layer' list into running sum
+			orig = np.array(gates_p_layer)
+			new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
+			for i in range(len(orig)):
+				new_running_sum[i] = np.sum(orig[:i+1])
+				
+			# Get layer of gate and use it to calculate death_rate for layer
+			cur_sum_index = 0
+			total = new_running_sum[cur_sum_index]
+
+			cur_layer = 1
+			num_layers = len(gates_p_layer)
+			for i, tb in enumerate(cur_dt):
+				if i >= total:
+					cur_layer += 1
+					cur_sum_index += 1
+                    
+					total = new_running_sum[cur_sum_index]
+						
+                portion_of_dr = float(cur_layer) / num_layers
                 K.set_value(tb["death_rate"], (desired_death_rate * portion_of_dr))
             
         class DynamicDropPathGates(Callback):
-            def __init__(self, final_death_rate, cur_dt, update_freq=1):
+            def __init__(self, final_death_rate, cur_dt, gates_p_layer, update_freq=1):
                 super(DynamicDropPathGates, self).__init__()
                 
                 self.dt = cur_dt
+                self.gates_p_layer = gates_p_layer
                 self.update_freq = update_freq
                 
                 if final_death_rate < 0.3:
@@ -842,15 +867,16 @@ if __name__ == '__main__':
                 else:
                     range_val = 0.25
 
-                self.init_death_rate = final_death_rate - range_val
+                self.final_death_rate = final_death_rate
                 self.range = range_val
 
             def on_epoch_begin(self, epoch, logs={}):
                 # Update death rates
-                step_size = float(self.range / self.params["epochs"])
+                total_epoch = self.params["epochs"]
+                subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)
+                cur_death_rate = (self.final_death_rate - subtract_val)             
                 
-                self.cur_death_rate = self.init_death_rate + ((epoch + 1) * step_size)
-                set_up_death_rates(self.dt, self.cur_death_rate)
+                set_up_death_rates(self.dt, cur_death_rate, self.gates_p_layer)
                 
             def on_batch_begin(self, batch, logs={}):
                 # Randomly close some gates at start of every 'update_freq' batch
@@ -867,8 +893,8 @@ if __name__ == '__main__':
                     for tb in self.dt:
                         K.set_value(tb["gate"], 1)
                 
-        callbacks.append(DynamicDropPathGates(final_dr, drop_table, update_freq=4))
-    
+        callbacks.append(DynamicDropPathGates(final_dr, drop_table, 
+												gates_per_layer, update_freq=4))    
     
     # Conduct training
     batch_size = 64

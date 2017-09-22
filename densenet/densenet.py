@@ -448,14 +448,19 @@ if __name__ == '__main__':
     
     
     # Set up cosine annealing LR schedule callback
-    init_lr_val = 0.15
-    num_epochs = 75
+    init_lr_val = 0.125
+    num_epochs = 100
 
+    def get_cosine_scaler(base_val, cur_iter, total_iter):
+        if cur_iter < total_iter:
+            return (0.5 * base_val * (math.cos(math.pi * 
+                            (cur_iter % total_iter) / total_iter) + 1))
+        else:
+            return 0
+            
     def variable_epochs_cos_scheduler(init_lr=init_lr_val, total_epochs=num_epochs):
         def variable_epochs_cos_scheduler_helper(cur_epoch):
-            return (0.5 * init_lr * 
-                        (math.cos(math.pi * 
-                        (cur_epoch % total_epochs) / total_epochs) + 1))
+            return get_cosine_scaler(init_lr, cur_epoch, total_epochs)
             
         return variable_epochs_cos_scheduler_helper    
     
@@ -476,15 +481,16 @@ if __name__ == '__main__':
             else:
                 range_val = 0.25
              
-            self.init_dropout = final_dropout - range_val 
+            self.final_dropout = final_dropout 
             self.range = range_val
             
         def on_epoch_begin(self, epoch, logs={}):
-            # At start of every epoch, slowly increase dropout towards final value
-            step_size = float(self.range / self.params["epochs"])
-            
-            dropout_layer = self.model.get_layer("final_dropout")
-            dropout_layer.rate = self.init_dropout + ((epoch + 1) * step_size)
+            # At start of every epoch, slowly increase dropout towards final value                                                        
+            total_epoch = self.params["epochs"]
+            subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)            
+
+            dropout_layer = self.model.get_layer("final_dropout")            
+            dropout_layer.rate = (self.final_dropout - subtract_val)
 
     callbacks.append(DynamicDropoutWeights(final_dropout))
             
