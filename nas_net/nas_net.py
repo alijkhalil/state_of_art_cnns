@@ -46,7 +46,7 @@ from keras.applications.imagenet_utils import _obtain_input_shape
 
 
 USE_DROPPATH=True
-DEFAULT_DEATH_RATE=0.15
+DEFAULT_DEATH_RATE=0.1
 
 ELEMENTS_PER_COMBINATION=2
 COMBINATIONS_PER_LAYER=5
@@ -293,11 +293,13 @@ def make_prev_match_cur_layer(ip_prev, desired_spatial_dimen, desired_channels,
             prev_layer = Activation('relu')(prev_layer)
         
         if prev_need_spatial_adjust:
-            prev_layer = Conv2D(desired_channels, (1, 1), strides=(2,2), kernel_initializer='he_uniform', 
+            #prev_layer = Conv2D(desired_channels, (1, 1), strides=(2,2), kernel_initializer='he_uniform', 
+            prev_layer = SeparableConv2D(desired_channels, (3, 3), strides=(2,2), kernel_initializer='he_uniform', 
                                     padding='same', use_bias=True, 
                                     kernel_regularizer=l2(weight_decay))(prev_layer)
         else:
-            prev_layer = Conv2D(desired_channels, (1, 1), kernel_initializer='he_uniform', 
+            #prev_layer = Conv2D(desired_channels, (1, 1), kernel_initializer='he_uniform', 
+            prev_layer = SeparableConv2D(desired_channels, (3, 3), kernel_initializer='he_uniform', 
                                     padding='same', use_bias=True, 
                                     kernel_regularizer=l2(weight_decay))(prev_layer)        
 
@@ -678,7 +680,7 @@ def __create_nas_cell_net(nb_classes, img_input, include_top, init_filters=DEFAU
             dt_end += total_elements_per_NAS_cell
 
         # Double number of channels and pass through reduction cell
-        num_channels = int(num_channels * 2.75)
+        num_channels = int(num_channels * 2.5)
         if i < num_reduction_cells:
             cur_spatial, cur_channels = layer_into_spatial_and_channels(cur_hid[0])
             prev_hid = make_prev_match_cur_layer(prev_hid, cur_spatial, cur_channels)
@@ -764,14 +766,14 @@ if __name__ == '__main__':
     
     
     # Initialize model
-    #model, drop_table = NASNet(x_train.shape[1:], init_filters=40, repeat_val=3)
-    model, drop_table = NASNet(x_train.shape[1:], init_filters=36, repeat_val=4)
+    model, drop_table = NASNet(x_train.shape[1:], init_filters=48, repeat_val=3)
+    #model, drop_table = NASNet(x_train.shape[1:], init_filters=80, repeat_val=4)
     model.summary()
     
     init_lr_val = 0.125
     model.compile(loss='categorical_crossentropy',
                         optimizer=SGD(lr=init_lr_val), 
-                        metrics=['accuracy', metrics.top_k_categorical_accuracy])        
+                        metrics=['accuracy', metrics.top_k_categorical_accuracy])
     
     
     # Set up cosine annealing LR schedule callback
@@ -826,29 +828,29 @@ if __name__ == '__main__':
         final_dr = DEFAULT_DEATH_RATE
         
         total_elements_per_NAS_cell = COMBINATIONS_PER_LAYER * ELEMENTS_PER_COMBINATION
-        total_NAS_cells = float(len(drop_table) / total_elements_per_NAS_cell)                    
-		gates_per_layer = [total_elements_per_NAS_cell] * total_NAS_cells
+        total_NAS_cells = int(len(drop_table) / total_elements_per_NAS_cell)
+        gates_per_layer = [total_elements_per_NAS_cell] * total_NAS_cells
 		
         def set_up_death_rates(cur_dt, desired_death_rate, gates_p_layer):
-			# Convert 'gates_p_layer' list into running sum
-			orig = np.array(gates_p_layer)
-			new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
-			for i in range(len(orig)):
-				new_running_sum[i] = np.sum(orig[:i+1])
-				
-			# Get layer of gate and use it to calculate death_rate for layer
-			cur_sum_index = 0
-			total = new_running_sum[cur_sum_index]
+            # Convert 'gates_p_layer' list into running sum
+            orig = np.array(gates_p_layer)
+            new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
+            for i in range(len(orig)):
+                new_running_sum[i] = np.sum(orig[:i+1])
+                
+            # Get layer of gate and use it to calculate death_rate for layer
+            cur_sum_index = 0
+            total = new_running_sum[cur_sum_index]
 
-			cur_layer = 1
-			num_layers = len(gates_p_layer)
-			for i, tb in enumerate(cur_dt):
-				if i >= total:
-					cur_layer += 1
-					cur_sum_index += 1
+            cur_layer = 1
+            num_layers = len(gates_p_layer)
+            for i, tb in enumerate(cur_dt):
+                if i >= total:
+                    cur_layer += 1
+                    cur_sum_index += 1
                     
-					total = new_running_sum[cur_sum_index]
-						
+                    total = new_running_sum[cur_sum_index]
+                    
                 portion_of_dr = float(cur_layer) / num_layers
                 K.set_value(tb["death_rate"], (desired_death_rate * portion_of_dr))
             

@@ -46,13 +46,14 @@ from keras.applications.imagenet_utils import _obtain_input_shape
 
 USE_DROPPATH=True
 DEFAULT_DEATH_RATE=0.15
+DEFAULT_DROPOUT_RATE=0.15
+DEFAULT_WEIGHT_DECAY=1E-4
 
+DEFAULT_NUM_EPOCHS=100
 DEFAULT_DEPTH=58
 DEFAULT_NUM_BLOCKS=3
 DEFAULT_INIT_FILTERS=128
 DEFAULT_LAYERS_PER_BLOCK=[12, 32, 10]
-DEFAULT_DROPOUT_RATE=0.15
-DEFAULT_WEIGHT_DECAY=1E-4
 DEFAULT_NUM_CLASSES=100
 
 
@@ -124,9 +125,10 @@ def DualPathNetwork(input_shape=None, depth=DEFAULT_DEPTH, nb_dense_block=DEFAUL
         else:
             img_input = input_tensor
 
-    x, drop_table = __create_dual_path_net(classes, img_input, include_top, depth, nb_dense_block,
-                           init_filters, nb_layers_per_block, dropout_rate, 
-                           weight_decay, activation)
+    x, drop_table = __create_dual_path_net(classes, img_input, include_top, depth, 
+                                            nb_dense_block, init_filters, 
+                                            nb_layers_per_block, dropout_rate, use_droppath, 
+                                            weight_decay, activation)
 
     # Ensure that the model takes into account any potential predecessors of 'input_tensor'
     if input_tensor is not None:
@@ -177,6 +179,7 @@ def __conv_block(ip, nb_filter, smaller_filters=False, weight_decay=DEFAULT_WEIG
     output = add([x3by3, x_other])
     
     
+    # Return output layer
     return output
 
 
@@ -224,6 +227,7 @@ def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIG
     output = add([x1, x2])
     
     
+    # Return output layer
     return output
 
     
@@ -269,6 +273,7 @@ def drop_path(gate):
         return K.switch(gate, tensors[1], tensors[0])
 			
     return Lambda(func)      
+    
     
 # Wrapper for add combination layer (with drop path functionality incorporated)
 def res_add(layers, drop_dict):
@@ -331,8 +336,9 @@ def __dpn_block(x, nb_layers, nb_filter, growth_rate, drop_table,
     
 def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEPTH, 
                         nb_dense_block=DEFAULT_NUM_BLOCKS, init_filters=DEFAULT_INIT_FILTERS, 
-                        nb_layers_per_block=DEFAULT_LAYERS_PER_BLOCK, dropout_rate=DEFAULT_DROPOUT_RATE, 
-                        weight_decay=DEFAULT_WEIGHT_DECAY, activation='softmax'):
+                        nb_layers_per_block=DEFAULT_LAYERS_PER_BLOCK, use_droppath=USE_DROPPATH,
+                        dropout_rate=DEFAULT_DROPOUT_RATE, weight_decay=DEFAULT_WEIGHT_DECAY, 
+                        activation='softmax'):
     ''' Build the DPN model.
     Args:
         nb_classes: number of classes
@@ -467,8 +473,8 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
                                         drop_table[dt_start:dt_end], smaller_filters, 
                                         weight_decay=weight_decay)
 		
-        dt_start += nb_layers[block_idx]
-        dt_end += nb_layers[block_idx]
+        dt_start = int(np.sum(np.array(nb_layers[:block_idx+1])))
+        dt_end = int(np.sum(np.array(nb_layers[:block_idx+2])))
         
         # Add transition_block (for every block except the last one)
         if block_idx != (nb_dense_block-1):
@@ -487,7 +493,8 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
         if dropout_rate:
             x = Dropout(dropout_rate, name="final_dropout")(x)
             
-        x = Dense(nb_classes, activation=activation, kernel_regularizer=l2(weight_decay), 
+        x = Dense(nb_classes, name="predictions", activation=activation, 
+                        kernel_regularizer=l2(weight_decay), 
                         bias_regularizer=l2(weight_decay))(x)
 
     
@@ -556,7 +563,7 @@ if __name__ == '__main__':
 
                         
     # Set up cosine annealing LR schedule callback
-    num_epochs = 100
+    num_epochs = DEFAULT_NUM_EPOCHS
 
     def get_cosine_scaler(base_val, cur_iter, total_iter):
         if cur_iter < total_iter:
@@ -576,61 +583,63 @@ if __name__ == '__main__':
     
     # Set up increasing Dropout callback
     final_dropout = DEFAULT_DROPOUT_RATE
-        
-    class DynamicDropoutWeights(Callback):
-        def __init__(self, final_dropout):
-            super(DynamicDropoutWeights, self).__init__()
+    
+    if final_dropout:
+        class DynamicDropoutWeights(Callback):
+            def __init__(self, final_dropout):
+                super(DynamicDropoutWeights, self).__init__()
 
-            if final_dropout < 0.3:
-                range_val = final_dropout * 0.375
-            elif final_dropout < 0.6:
-                range_val = 0.175
-            else:
-                range_val = 0.25
-             
-            self.final_dropout = final_dropout 
-            self.range = range_val
-            
-        def on_epoch_begin(self, epoch, logs={}):
-            # At start of every epoch, slowly increase dropout towards final value                                                        
-            total_epoch = self.params["epochs"]
-            subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)            
+                if final_dropout < 0.3:
+                    range_val = final_dropout * 0.375
+                elif final_dropout < 0.6:
+                    range_val = 0.175
+                else:
+                    range_val = 0.25
+                 
+                self.final_dropout = final_dropout 
+                self.range = range_val
+                
+            def on_epoch_begin(self, epoch, logs={}):
+                # At start of every epoch, slowly increase dropout towards final value                                                        
+                total_epoch = self.params["epochs"]
+                subtract_val = get_cosine_scaler(self.range, (epoch + 1), total_epoch)            
 
-            dropout_layer = self.model.get_layer("final_dropout")            
-            dropout_layer.rate = (self.final_dropout - subtract_val)
+                dropout_layer = self.model.get_layer("final_dropout")            
+                dropout_layer.rate = (self.final_dropout - subtract_val)
 
-    callbacks.append(DynamicDropoutWeights(final_dropout))
+        callbacks.append(DynamicDropoutWeights(final_dropout))
             
             
     # Set up Drop Path callback
     if USE_DROPPATH:
         final_dr = DEFAULT_DEATH_RATE
+        
         total_num_layers = int(np.sum(np.array(DEFAULT_LAYERS_PER_BLOCK)))
         gates_per_layer = [1] * total_num_layers
 		
         def set_up_death_rates(cur_dt, desired_death_rate, gates_p_layer):
-			# Convert 'gates_p_layer' list into running sum
-			orig = np.array(gates_p_layer)
-			new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
-			for i in range(len(orig)):
-				new_running_sum[i] = np.sum(orig[:i+1])
-				
-			# Get layer of gate and use it to calculate death_rate for layer
-			cur_sum_index = 0
-			total = new_running_sum[cur_sum_index]
+            # Convert 'gates_p_layer' list into running sum
+            orig = np.array(gates_p_layer)
+            new_running_sum = np.ndarray(shape=(len(gates_p_layer)))
+            for i in range(len(orig)):
+                new_running_sum[i] = np.sum(orig[:i+1])
+                
+            # Get layer of gate and use it to calculate death_rate for layer
+            cur_sum_index = 0
+            total = new_running_sum[cur_sum_index]
 
-			cur_layer = 1
-			num_layers = len(gates_p_layer)
-			for i, tb in enumerate(cur_dt):
-				if i >= total:
-					cur_layer += 1
-					cur_sum_index += 1
+            cur_layer = 1
+            num_layers = len(gates_p_layer)
+            for i, tb in enumerate(cur_dt):
+                if i >= total:
+                    cur_layer += 1
+                    cur_sum_index += 1
                     
-					total = new_running_sum[cur_sum_index]
-						
+                    total = new_running_sum[cur_sum_index]
+
                 portion_of_dr = float(cur_layer) / num_layers
                 K.set_value(tb["death_rate"], (desired_death_rate * portion_of_dr))
-            
+
         class DynamicDropPathGates(Callback):
             def __init__(self, final_death_rate, cur_dt, gates_p_layer, update_freq=1):
                 super(DynamicDropPathGates, self).__init__()

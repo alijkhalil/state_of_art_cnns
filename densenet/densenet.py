@@ -53,7 +53,7 @@ from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
 
 
-DEFAULT_FINAL_DROPOUT_RATE=0.2
+DEFAULT_FINAL_DROPOUT_RATE=0.15
 
 TH_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Theano-Backend-TH-dim-ordering.h5'
 TF_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Tensorflow-Backend-TF-dim-ordering.h5'
@@ -319,10 +319,12 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
 					be (nb_dense_block + 1)
         bottleneck: add bottleneck blocks
         reduction: reduction factor of transition blocks. Note : reduction value is inverted to compute compression
-        dropout_rate: dropout rate
+        dropout_rate: general dropout rate
+        final_dropout: dropout rate of final FC layer
         weight_decay: weight decay
         activation: Type of activation at the top layer. Can be one of 'softmax' or 'sigmoid'.
                 Note that if sigmoid is used, classes must be 1.
+                
     Returns: keras tensor with nb_layers of conv_block appended
     '''
 
@@ -468,7 +470,7 @@ if __name__ == '__main__':
     
     
     # Set up increasing Dropout callback
-    final_dropout = DEFAULT_DROPOUT_RATE
+    final_dropout = DEFAULT_FINAL_DROPOUT_RATE
         
     class DynamicDropoutWeights(Callback):
         def __init__(self, final_dropout):
