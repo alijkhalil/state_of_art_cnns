@@ -50,10 +50,10 @@ DEFAULT_DROPOUT_RATE=0.15
 DEFAULT_WEIGHT_DECAY=1E-4
 
 DEFAULT_NUM_EPOCHS=100
-DEFAULT_DEPTH=58
+DEFAULT_DEPTH=56
 DEFAULT_NUM_BLOCKS=3
 DEFAULT_INIT_FILTERS=128
-DEFAULT_LAYERS_PER_BLOCK=[12, 32, 10]
+DEFAULT_LAYERS_PER_BLOCK=[6, 28, 18]
 DEFAULT_NUM_CLASSES=100
 
 
@@ -272,7 +272,7 @@ def drop_path(gate):
     def func(tensors, gate=gate):
         return K.switch(gate, tensors[1], tensors[0])
 			
-    return Lambda(func)      
+    return Lambda(func)   
     
     
 # Wrapper for add combination layer (with drop path functionality incorporated)
@@ -386,6 +386,13 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
 
         nb_layers = [nb_layers_per_block] * nb_dense_block
 
+
+    # Check init filters to make sure they are an acceptable value
+    if init_filters < 64:
+        init_filters = 64
+    elif init_filters % 16 != 0:
+        init_filters += (16 - (init_filters % 16))
+        
         
     # Create drop table
     total_residuals = np.sum(np.array(nb_layers))
@@ -400,19 +407,12 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
             
     else:
         drop_table = [None] * total_residuals    
-
+        
         
     # Initial convolution
     x = Conv2D(init_filters, (3, 3), kernel_initializer='he_uniform', 
                 padding='same', name='initial_conv2D',
                 use_bias=True, kernel_regularizer=l2(weight_decay))(img_input)
-
-	
-    # Check init filters to make sure they are an acceptable value
-    if init_filters < 64:
-        init_filters = 64
-    elif init_filters % 16 != 0:
-        init_filters += (16 - (init_filters % 16))
         
     
     # Add dense blocks
@@ -435,9 +435,9 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
         # Figure out appropriate growth rate
         filter_diff = next_filters - init_filters
         if block_idx == 0 or block_idx == (nb_dense_block - 1):
-            growth_rate = 1.5
-        else:
             growth_rate = 2
+        else:
+            growth_rate = 3.25
             
         growth_channels = int((growth_rate * filter_diff) // nb_layers[block_idx])
         
@@ -445,7 +445,7 @@ def __create_dual_path_net(nb_classes, img_input, include_top, depth=DEFAULT_DEP
         if channel_min_limit > 16:
             channel_min_limit = 16
             
-        channel_max_limit = (filter_diff * 0.125)
+        channel_max_limit = (filter_diff * 0.2)
         if channel_max_limit > 50:
             channel_max_limit = 50
         

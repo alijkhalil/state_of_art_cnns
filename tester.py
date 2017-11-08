@@ -12,6 +12,7 @@ from polynet import polynet
 import keras.backend as K
 
 from keras import metrics
+from keras.callbacks import ModelCheckpoint
 from keras.optimizers import *
 from keras.datasets import cifar100
 from keras.utils import to_categorical
@@ -38,9 +39,9 @@ if __name__ == '__main__':
     # Set up argument parser 
 	#
 	# Format: 
-	#		tester.py model_type [--dropout <float>] [--droppath <float>] 
-	#							 [--lr [<learning_rate>]] 
-	#							 [--epochs [<num_of_training_epochs>]]
+	#		tester.py <model_type> [--dropout [<float>]] [--droppath [<float>]] 
+	#							[--lr [<learning_rate>]] 
+	#							[--epochs [<num_of_training_epochs>]] [--save_weights]
 	#
     parser = argparse.ArgumentParser(description='Test module for state-of-the-art CNNs.')
     
@@ -54,6 +55,8 @@ if __name__ == '__main__':
                             help='learning rate for training with cosine annealing SGD (no flag defaults to 0.125)')                            
     parser.add_argument('--epochs', nargs='?', default=100, const=100, type=int, metavar='num_training_epochs',
                             help='number of training epochs on the CIFAR100 dataset (no flag defaults to 100)')                            
+    parser.add_argument('--save_weights', action='store_true', help='flag to save weights in the following format: ' \
+                                    '<model_dir>/weights-cifar100-<dropout>-<droppath>-<lr>-<epochs>.hdf5')                            							
     
     args = parser.parse_args()
 
@@ -100,6 +103,7 @@ if __name__ == '__main__':
     final_droppath = args.droppath
     
     if model_type == NAS_KEYWORD:
+        weight_dirname = "./nas_net/"
         model, drop_table = nas_net.NASNet(x_train.shape[1:], init_filters=48, repeat_val=3)
         #model, drop_table = nas_net.NASNet(x_train.shape[1:], init_filters=80, repeat_val=4)
 
@@ -109,53 +113,82 @@ if __name__ == '__main__':
         gates_per_layer = [total_elements_per_NAS_cell] * total_NAS_cells
 
     elif model_type == DN_KEYWORD:
-        model = densenet.DenseNet(x_train.shape[1:], depth=124, 
-                            nb_dense_block=3, nb_layers_per_block=[24, 64, 32],
-                            bottleneck=True, reduction=0.4, growth_rate=20, weights=None, 
+        weight_dirname = "./densenet/"
+        '''
+        model = densenet.DenseNet(x_train.shape[1:], depth=122, 
+                            nb_dense_block=3, nb_layers_per_block=[24, 66, 28],
+                            bottleneck=True, reduction=0.4, growth_rate=18, weights=None, 
                             dropout_rate=0.0, final_dropout=final_dropout, 
                             classes=num_classes)    
-    
+        '''
+        
+        # ALT
+        model = densenet.DenseNet(x_train.shape[1:], depth=88, 
+                            nb_dense_block=3, nb_layers_per_block=[16, 48, 20],
+                            bottleneck=True, reduction=0.4, growth_rate=24, weights=None, 
+                            dropout_rate=0.0, final_dropout=final_dropout, 
+                            classes=num_classes)    
+
+        
     elif model_type == POLY_KEYWORD:
+        weight_dirname = "./polynet/"
         model = polynet.PolyNet(x_train.shape[1:], init_nb_filters=88, 
                             final_dropout=final_dropout, 
                             classes=num_classes)    
-    
+
     elif model_type == DPN_KEYWORD:
-        model, drop_table = dpn.DualPathNetwork(x_train.shape[1:], init_filters=80)
+        weight_dirname = "./dual_path_net/"
+        model, drop_table = dpn.DualPathNetwork(x_train.shape[1:], init_filters=64)
 
         total_num_layers = int(np.sum(np.array(dpn.DEFAULT_LAYERS_PER_BLOCK)))
         gates_per_layer = [1] * total_num_layers
-    
-    
+
+
     # Print model summary
     model.summary()
-
+    
     
     # Set up callbacks depending on options                            
     init_lr_val = args.lr
     num_epochs = args.epochs
-    
-    callbacks = [ cb_utils.CosineLRScheduler(init_lr_val, num_epochs) ]                              
+    save_weights = args.save_weights
 
+    callbacks = [ cb_utils.CosineLRScheduler(init_lr_val, num_epochs) ]       
+
+    # Save weights if requested
+    if save_weights:
+        weight_path = weight_dirname + "weights-cifar100-"
+        weight_path += (str(final_dropout) + "-" + str(final_droppath) + 
+                            "-" + str(init_lr_val) + "-" + str(num_epochs) + 
+                            ".hdf5.alt")
+        
+        print(weight_path)
+        callbacks.append(ModelCheckpoint(weight_path, 
+                            monitor="acc", period=int(num_epochs // 2),
+                            save_best_only=False, save_weights_only=True))
+                            
     # Set up increasing Dropout callback
     if final_dropout != 0:
-        print(final_dropout)
         callbacks.append(cb_utils.DynamicDropoutWeights(final_dropout))
             
     # Set up increasing stochastic depth (aka "Drop Path") callback
-    if final_droppath != 0 and model_type in DROPPATH_MODELS:
-        print(final_droppath)
-        callbacks.append(cb_utils.DynamicDropPathGates(
+    if final_droppath != 0:
+        if model_type in DROPPATH_MODELS:
+            callbacks.append(cb_utils.DynamicDropPathGates(
                                                 final_droppath, drop_table, 
                                                 gates_per_layer))
+        else:
+            raise ValueError("Droppath flag cannot be used with '%s'.\n" \
+                                "It is only compatible with the following models:  %s" % 
+                                (model_type, ", ".join(DROPPATH_MODELS)))
         
-		
+    
     # Compile model and conduct training
     batch_size = 64
     model.compile(loss='categorical_crossentropy',
                         optimizer=SGD(lr=init_lr_val), 
                         metrics=['accuracy', metrics.top_k_categorical_accuracy])   
-    
+
     hist = model.fit_generator(
                     global_image_aug.flow(x_train, y_train, batch_size=batch_size),
                     steps_per_epoch=(x_train.shape[0] // batch_size),
@@ -168,6 +201,6 @@ if __name__ == '__main__':
     print(model.metrics_names)
     print(model.evaluate(x_test, y_test, verbose=0))
 
-    
+
     # Return successfully
     exit(0)

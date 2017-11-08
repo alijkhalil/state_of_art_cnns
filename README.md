@@ -4,7 +4,7 @@ Repository with recent state-of-the-art CNN architectures implemented in Keras.
 Each architecture can be tested out-of-the-box with the tester.py script using:  
   python tester.py <model_name> [--dropout [<dropout_rate>]] 
 		[--droppath [<droppath_rate>]] [--lr [<learning_rate>]] 
-		[--epochs [<num_of_training_epochs>]]
+		[--epochs [<num_of_training_epochs>]] [--save_weights]
 
 The test script reqiures the "dl_utilities" package (easily attainable using the "set_up.sh" shell script).
 		

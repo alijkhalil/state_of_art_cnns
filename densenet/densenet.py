@@ -10,9 +10,9 @@ in the past several years in computer vision.
 # Note:
     While the code for a DenseNet model will always look similar regardless of 
     particular implementation choices, it is still prudent to acknowledge the 
-    heavy influence of the GitHub repo (titu1994/DenseNet) on this work.  There 
-    have been a large number of substanial changes made to the original code, 
-    but the core of the code remains the same in spirit.
+    heavy influence of the GitHub repo (titu1994/DenseNet) on this work.  While 
+    there are substanial changes from the original code and differences in low-
+	level details, the structure of the functionality remains similar in spirit.
 
 # Reference:
     https://arxiv.org/pdf/1608.06993.pdf
@@ -22,21 +22,17 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
 
-import warnings, math
+import math
 
 import numpy as np
 import tensorflow as tf
 
 import keras
-from keras.models import Model
-from keras.datasets import cifar100
-
-from keras.preprocessing.image import ImageDataGenerator
-from keras.callbacks import Callback, LearningRateScheduler, ModelCheckpoint
-
 import keras.backend as K
-from keras.optimizers import *
+
 from keras import metrics
+from keras.optimizers import *
+from keras.models import Model
 
 from keras.layers.core import Dense, Dropout, Activation, Reshape
 from keras.layers.convolutional import Conv2D
@@ -53,22 +49,19 @@ from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
 
 
-DEFAULT_FINAL_DROPOUT_RATE=0.15
+DEFAULT_FINAL_DROPOUT_RATE=0.1
 
-TH_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Theano-Backend-TH-dim-ordering.h5'
 TF_WEIGHTS_PATH = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Tensorflow-Backend-TF-dim-ordering.h5'
-TH_WEIGHTS_PATH_NO_TOP = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Theano-Backend-TH-dim-ordering-no-top.h5'
-TF_WEIGHTS_PATH_NO_TOP = 'https://github.com/titu1994/DenseNet/releases/download/v2.0/DenseNet-40-12-Tensorflow-Backend-TF-dim-ordering-no-top.h5'
 
 
 
-def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_filter=16, 
-				nb_layers_per_block=-1, bottleneck=False, reduction=0.0, dropout_rate=0.0, 
-				final_dropout=0.0, weight_decay=1E-4, include_top=True, weights='cifar10', 
-				input_tensor=None, classes=100, activation='softmax'):
+def DenseNet(input_shape=None, depth=82, nb_dense_block=3, growth_rate=16, nb_filter=32, 
+				nb_layers_per_block=-1, bottleneck=True, reduction=0.25, dropout_rate=0.0, 
+				final_dropout=DEFAULT_FINAL_DROPOUT_RATE, weight_decay=1E-4, include_top=True, 
+				weights=None, input_tensor=None, classes=100, activation='softmax'):
 			 
     '''Instantiate the DenseNet architecture, optionally loading weights pre-trained
-        on CIFAR-10. Note that when using TensorFlow, for best performance you should 
+        on CIFAR-100. Note that when using TensorFlow, for best performance you should 
         set `image_data_format='channels_last'` in your Keras config at ~/.keras/keras.json.
         
         The model and the weights are compatible with both TensorFlow and Theano. 
@@ -104,7 +97,7 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
             include_top: whether to include the fully-connected
                 layer at the top of the network.
             weights: one of `None` (random initialization) or
-                'cifar10' (pre-training on CIFAR-10)..
+                'cifar100' (pre-training on CIFAR-100).
             input_tensor: optional Keras tensor (i.e. output of `layers.Input()`)
                 to use as image input for the model.
             classes: optional number of classes to classify images
@@ -117,14 +110,15 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
             A Keras model instance.
         '''
 
-    if weights not in {'cifar10', None}:
+    # Check parameters	
+    if weights not in {'cifar100', None}:
         raise ValueError('The `weights` argument should be either '
                          '`None` (random initialization) or `cifar10` '
-                         '(pre-training on CIFAR-10).')
+                         '(pre-training on CIFAR-100).')
 
-    if weights == 'cifar10' and include_top and classes != 10:
-        raise ValueError('If using `weights` as CIFAR 10 with `include_top`'
-                         ' as true, `classes` should be 10')
+    if weights == 'cifar100' and include_top and classes != 100:
+        raise ValueError('If using `weights` as CIFAR 100 with `include_top`'
+                         ' as true, `classes` should be 100')
 
     if activation not in ['softmax', 'sigmoid']:
         raise ValueError('activation must be one of "softmax" or "sigmoid"')
@@ -132,6 +126,7 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
     if activation == 'sigmoid' and classes != 1:
         raise ValueError('sigmoid activation can only be used when classes = 1')
 
+        
     # Determine proper input shape
     input_shape = _obtain_input_shape(input_shape,
                                       default_size=32,
@@ -147,63 +142,52 @@ def DenseNet(input_shape=None, depth=40, nb_dense_block=3, growth_rate=12, nb_fi
         else:
             img_input = input_tensor
 
+            
+    # Create DN output
     x = __create_dense_net(classes, img_input, include_top, depth, nb_dense_block,
                            growth_rate, nb_filter, nb_layers_per_block, bottleneck, 
-						   reduction, dropout_rate, final_dropout, weight_decay, 
-						   activation)
+                           reduction, dropout_rate, final_dropout, weight_decay, 
+                           activation)
 
-    # Ensure that the model takes into account
-    # any potential predecessors of `input_tensor`.
+                           
+    # Ensure that the model takes into account any potential predecessors of `input_tensor`
     if input_tensor is not None:
         inputs = get_source_inputs(input_tensor)
     else:
         inputs = img_input
-    # Create model.
+        
+        
+    # Turn DN output into model
     model = Model(inputs, x, name='densenet')
 
-    # load weights
-    if weights == 'cifar10':
-        if (depth == 40) and (nb_dense_block == 3) and (growth_rate == 12) and (nb_filter == 16) and \
-                (bottleneck is False) and (reduction == 0.0) and (dropout_rate == 0.0) and (weight_decay == 1E-4):
+
+    # Load weights, if necessary
+    if weights == 'cifar100':
+        if ((depth == 40) and (nb_dense_block == 3) and (growth_rate == 12) and 
+                (nb_filter == 16) and (bottleneck is False) and (reduction == 0.0) 
+                and (dropout_rate == 0.0) and (final_dropout == DEFAULT_FINAL_DROPOUT_RATE) 
+                and (weight_decay == 1E-4)):
             
-			# Default parameters match. Weights for this model exist:
-            if K.image_data_format() == 'channels_first':
-                if include_top:
-                    weights_path = get_file('densenet_40_12_th_dim_ordering_th_kernels.h5',
-                                            TH_WEIGHTS_PATH,
-                                            cache_subdir='models')
-                else:
-                    weights_path = get_file('densenet_40_12_th_dim_ordering_th_kernels_no_top.h5',
-                                            TH_WEIGHTS_PATH_NO_TOP,
-                                            cache_subdir='models')
-
-                model.load_weights(weights_path)
-
-                if K.backend() == 'tensorflow':
-                    warnings.warn('You are using the TensorFlow backend, yet you '
-                                  'are using the Theano '
-                                  'image dimension ordering convention '
-                                  '(`image_data_format="channels_first"`). '
-                                  'For best performance, set '
-                                  '`image_data_format="channels_last"` in '
-                                  'your Keras config '
-                                  'at ~/.keras/keras.json.')
-                    convert_all_kernels_in_model(model)
+            # Since default parameters match, it is possible to load weights
+            assert K.image_data_format() != 'channels_first', \
+                        'To load pre-trained weights, Keras config file must set to use "channels_last".'
+            
+            if include_top:
+                weights_path = get_file('densenet_40_12_tf_dim_ordering_tf_kernels.h5',
+                                        TF_WEIGHTS_PATH,
+                                        cache_subdir='models_weights')
             else:
-                if include_top:
-                    weights_path = get_file('densenet_40_12_tf_dim_ordering_tf_kernels.h5',
-                                            TF_WEIGHTS_PATH,
-                                            cache_subdir='models')
-                else:
-                    weights_path = get_file('densenet_40_12_tf_dim_ordering_tf_kernels_no_top.h5',
-                                            TF_WEIGHTS_PATH_NO_TOP,
-                                            cache_subdir='models')
+                weights_path = get_file('densenet_40_12_tf_dim_ordering_tf_kernels_no_top.h5',
+                                        TF_WEIGHTS_PATH_NO_TOP,
+                                        cache_subdir='models_weights')
 
-                model.load_weights(weights_path)
+            model.load_weights(weights_path)
 
-                if K.backend() == 'theano':
-                    convert_all_kernels_in_model(model)
+            if K.backend() == 'theano':
+                convert_all_kernels_in_model(model)
+                            
 
+    # Return either pre-trained or randomly initialized model
     return model
 
 
@@ -253,7 +237,7 @@ def __transition_block(ip, nb_filter, compression=1.0, dropout_rate=None, weight
         dropout_rate: dropout rate
         weight_decay: weight decay factor
         
-    Returns: keras tensor, after applying batch_norm, relu-conv, dropout, maxpool
+    Returns: keras tensor, after applying BN, Relu-Conv, Dropout, Maxpool ops
     '''
 
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
@@ -300,8 +284,8 @@ def __dense_block(x, nb_layers, nb_filter, growth_rate, bottleneck=False, dropou
 
 def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_block=3, 
 						growth_rate=12, nb_filter=-1, nb_layers_per_block=-1, bottleneck=False, 
-						reduction=0.0, dropout_rate=None, final_dropout=None, weight_decay=1E-4, 
-						activation='softmax'):
+						reduction=0.0, dropout_rate=None, final_dropout=DEFAULT_FINAL_DROPOUT_RATE, 
+                        weight_decay=1E-4, activation='softmax'):
     ''' Build the DenseNet model
     Args:
         nb_classes: number of classes

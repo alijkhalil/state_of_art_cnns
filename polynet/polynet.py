@@ -198,9 +198,16 @@ def __transition_block(x, nb_filter, weight_decay=1E-4):
 def make_poly_function(input, layer, weight_decay=1E-4):
     concat_axis = 1 if K.image_data_format() == 'channels_first' else -1
     
+    num_filters = K.int_shape(input)[concat_axis]
     tmp_input = Input(shape=K.int_shape(input)[1:])
     
     output = Activation('relu')(tmp_input)
+    output = Conv2D(int(num_filters // 2), (1, 1), kernel_initializer='he_uniform', padding='same',
+                        use_bias=True, kernel_regularizer=l2(weight_decay))(output)
+    output = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
+						   beta_regularizer=l2(weight_decay))(output)
+    
+    output = Activation('relu')(output)
     output = layer(output)
     output = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
 						   beta_regularizer=l2(weight_decay))(output)
@@ -220,7 +227,7 @@ def do_poly_operation(input, layers_ops, type, N, weight_decay=1E-4):
         poly_funcs.append(make_poly_function(input, layer_op, weight_decay))
 
         
-    # Get initial output   
+    # Get initial output
     output = poly_funcs[0](input)
     
     # Add remaining parts of "mpoly-N" module
@@ -333,25 +340,30 @@ def __create_poly_net(nb_classes, img_input, include_top, nb_layers_per_block,
 	# Do mixed PolyNet sequence
     for num_layer in nb_layers_per_block[1:-1]:
         # PolyNet logic
-        poly_tuples = []
-        poly_tuples.append((MPOLYN, 3, [SeparableConv2D] * 3, [(3, 3)] * 3))
-        poly_tuples.append((POLYN, 3, [SeparableConv2D], [(3, 3)]))
-        poly_tuples.append((NWAY, 2, [SeparableConv2D] * 2, [(3, 3), (5, 5)]))
-        poly_tuples.append((MPOLYN, 3, [SeparableConv2D] * 3, [(3, 3)] * 3))
-        poly_tuples.append((POLYN, 3, [SeparableConv2D], [(3, 3)]))
+        if False:
+            poly_tuples = []
+            poly_tuples.append((MPOLYN, 3, [SeparableConv2D] * 3, [(3, 3)] * 3))
+            poly_tuples.append((POLYN, 3, [SeparableConv2D], [(3, 3)]))
+            poly_tuples.append((NWAY, 2, [SeparableConv2D] * 2, [(3, 3), (5, 5)]))
+            poly_tuples.append((MPOLYN, 3, [SeparableConv2D] * 3, [(3, 3)] * 3))
+            poly_tuples.append((POLYN, 3, [SeparableConv2D], [(3, 3)]))
 
-        num_el_in_seq = len(poly_tuples)
-        assert num_layer % num_el_in_seq == 0, \
-                    ("Middle blocks should be have number of layers divisible by %d" % num_el_in_seq)
-        num_sequences = int(num_layer // num_el_in_seq)
+            num_el_in_seq = len(poly_tuples)
+            assert num_layer % num_el_in_seq == 0, \
+                        ("Middle blocks should be have number of layers divisible by %d" % num_el_in_seq)
+            num_sequences = int(num_layer // num_el_in_seq)
 
-        x = __poly_inception_block(x, num_sequences, poly_tuples, weight_decay)
+            x = __poly_inception_block(x, num_sequences, poly_tuples, weight_decay)
             
+        else:
+            for _ in range(num_layer * 2):
+                y = __regular_residual_op(x, nb_filter, weight_decay)
+                x = add([x, y])            
+
         # Do middle transitions			
         nb_filter = int(nb_filter * 2)
-        x = __transition_block(x, nb_filter)
-        
-        
+        x = __transition_block(x, nb_filter)                
+
     # Do final ResNet connections    
     num_layers = 6
     for _ in range(num_layers):
