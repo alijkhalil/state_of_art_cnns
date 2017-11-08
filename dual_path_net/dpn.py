@@ -15,7 +15,7 @@ from __future__ import division
 
 import warnings
 
-import math
+import sys, math
 import numpy as np
 
 import tensorflow as tf
@@ -42,6 +42,9 @@ from keras.utils.layer_utils import convert_all_kernels_in_model
 from keras.utils.data_utils import get_file
 from keras.engine.topology import get_source_inputs
 from keras.applications.imagenet_utils import _obtain_input_shape
+
+sys.path.append("..")
+from dl_utilities.layers import general as dl_layers
 
 
 USE_DROPPATH=True
@@ -230,74 +233,7 @@ def __transition_block(prev_ip, cur_ip, new_nb_filter, weight_decay=DEFAULT_WEIG
     # Return output layer
     return output
 
-    
-# Helper Layer for getting a subsection of a layer
-#  
-# Usage example:    x = crop(2, 5, 10)(x)
-def crop(dimension, start, end=0):
-    def func(x, dimension=dimension, start=start, end=end):
-        if not end:
-            end = K.int_shape(x)[dimension]
 
-        if dimension < 0:
-            dimension += len(K.int_shape(x))
-
-        if dimension == 0:
-            return x[start: end]
-        if dimension == 1:
-            return x[:, start: end]
-        if dimension == 2:
-            return x[:, :, start: end]
-        if dimension == 3:
-            return x[:, :, :, start: end]
-        if dimension == 4:
-            return x[:, :, :, :, start: end]
-			
-    return Lambda(func)
-
-
-# Layer for scaling down activations at test time
-def scale_activations(drop_rate):
-    def func(x, drop_rate=drop_rate):
-        scale = K.ones_like(x) - drop_rate
-        return K.in_test_phase(scale * x, x)
-    
-    return Lambda(func)
-
-
-# Layer for dropping path based on a "gate" variable
-#   Input should be formatted: [drop_path, normal_path] 
-#   "Gate" variable should be set to 1 to return "normal_path"
-def drop_path(gate):
-    def func(tensors, gate=gate):
-        return K.switch(gate, tensors[1], tensors[0])
-			
-    return Lambda(func)   
-    
-    
-# Wrapper for add combination layer (with drop path functionality incorporated)
-def res_add(layers, drop_dict):
-    if drop_dict is not None:
-        # Get death_rate and drop gate variables from table
-        gate = drop_dict["gate"]
-        death_rate = drop_dict["death_rate"]
-
-        # Get main and scaled (during test time) residual channels
-        main_channels, res_channels = layers
-        res_scaled = scale_activations(death_rate)(res_channels)
-
-        # Add scaled value only if gate is open, otherwise keep untouched
-        non_drop_path = add([main_channels, res_scaled])        
-        ret_layer = drop_path(gate)([main_channels, non_drop_path])        
-        
-    else:
-        ret_layer = add(layers)
-        
-    
-    # Return final layer
-    return ret_layer
-    
-    
 def __dpn_block(x, nb_layers, nb_filter, growth_rate, drop_table,
                     smaller_filters=False, weight_decay=DEFAULT_WEIGHT_DECAY):
     ''' Build a dense_block where the output of each conv_block is fed to subsequent ones
@@ -317,14 +253,14 @@ def __dpn_block(x, nb_layers, nb_filter, growth_rate, drop_table,
     for i in range(nb_layers):
         cb = __conv_block(x, nb_filter + growth_rate, smaller_filters, weight_decay)
 
-        cb_res = crop(concat_axis, 0, nb_filter)(cb)
-        cb_dense = crop(concat_axis, nb_filter)(cb)
+        cb_res = dl_layers.crop(0, nb_filter, dimension=concat_axis)(cb)
+        cb_dense = dl_layers.crop(nb_filter, dimension=concat_axis)(cb)
         
         if i == 0:
-            total_res = res_add([x, cb_res], drop_table[i])
+            total_res = dl_layers.res_add(drop_table[i])([x, cb_res])
             total_dense = cb_dense
         else:
-            total_res = res_add([total_res, cb_res], drop_table[i])
+            total_res = dl_layers.res_add(drop_table[i])([total_res, cb_res])
             total_dense = concatenate([total_dense, cb_dense], axis=concat_axis)
 
         x = concatenate([total_res, total_dense], axis=concat_axis)
