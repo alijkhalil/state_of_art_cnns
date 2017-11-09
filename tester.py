@@ -105,7 +105,6 @@ if __name__ == '__main__':
     if model_type == NAS_KEYWORD:
         weight_dirname = "./nas_net/"
         model, drop_table = nas_net.NASNet(x_train.shape[1:], init_filters=48, repeat_val=3)
-        #model, drop_table = nas_net.NASNet(x_train.shape[1:], init_filters=80, repeat_val=4)
 
         total_elements_per_NAS_cell = (nas_net.COMBINATIONS_PER_LAYER * 
                                         nas_net.ELEMENTS_PER_COMBINATION)
@@ -114,15 +113,6 @@ if __name__ == '__main__':
 
     elif model_type == DN_KEYWORD:
         weight_dirname = "./densenet/"
-        '''
-        model = densenet.DenseNet(x_train.shape[1:], depth=122, 
-                            nb_dense_block=3, nb_layers_per_block=[24, 66, 28],
-                            bottleneck=True, reduction=0.4, growth_rate=18, weights=None, 
-                            dropout_rate=0.0, final_dropout=final_dropout, 
-                            classes=num_classes)    
-        '''
-        
-        # ALT
         model = densenet.DenseNet(x_train.shape[1:], depth=88, 
                             nb_dense_block=3, nb_layers_per_block=[16, 48, 20],
                             bottleneck=True, reduction=0.4, growth_rate=24, weights=None, 
@@ -160,7 +150,7 @@ if __name__ == '__main__':
         weight_path = weight_dirname + "weights-cifar100-"
         weight_path += (str(final_dropout) + "-" + str(final_droppath) + 
                             "-" + str(init_lr_val) + "-" + str(num_epochs) + 
-                            ".hdf5.alt")
+                            ".hdf5")
         
         print(weight_path)
         callbacks.append(ModelCheckpoint(weight_path, 

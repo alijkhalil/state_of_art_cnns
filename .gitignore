@@ -1,4 +1,5 @@
 gpu0.log
 gpu1.log
 *.pyc
+*.hdf5
 dl_utilities
