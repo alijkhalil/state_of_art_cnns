@@ -87,7 +87,7 @@ def DenseNet(input_shape=None, depth=82, nb_dense_block=3, growth_rate=16, nb_fi
                 If -1, calculates nb_layer_per_block from the network depth.
                 If positive integer, a set number of layers per dense block.
                 If list, nb_layer is used as provided. Note that list size must
-                be (nb_dense_block + 1)
+                    be (nb_dense_block + 1)
             bottleneck: flag to add bottleneck blocks in between dense blocks
             reduction: reduction factor of transition blocks.
                 Note : reduction value is inverted to compute compression.
@@ -128,12 +128,6 @@ def DenseNet(input_shape=None, depth=82, nb_dense_block=3, growth_rate=16, nb_fi
 
         
     # Determine proper input shape
-    input_shape = _obtain_input_shape(input_shape,
-                                      default_size=32,
-                                      min_size=8,
-                                      data_format=K.image_data_format(),
-                                      include_top=include_top)
-
     if input_tensor is None:
         img_input = Input(shape=input_shape)
     else:
@@ -206,19 +200,19 @@ def __conv_block(ip, nb_filter, bottleneck=False, dropout_rate=None, weight_deca
 
     if bottleneck:
         x = Conv2D(nb_filter * 4, (1, 1), kernel_initializer='he_uniform', padding='same', use_bias=True,
-                   kernel_regularizer=l2(weight_decay))(ip)
+                        kernel_regularizer=l2(weight_decay))(ip)
 
         x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
-                               beta_regularizer=l2(weight_decay))(x)
+                                    beta_regularizer=l2(weight_decay))(x)
         x = Activation('relu')(x)
     else:
         x = ip
         
     x = Conv2D(nb_filter, (3, 3), kernel_initializer='he_uniform', padding='same', use_bias=True,
-               kernel_regularizer=l2(weight_decay))(x)
+                    kernel_regularizer=l2(weight_decay))(x)
 
     x = BatchNormalization(axis=concat_axis, gamma_regularizer=l2(weight_decay),
-                           beta_regularizer=l2(weight_decay))(x)
+                                beta_regularizer=l2(weight_decay))(x)
     x = Activation('relu')(x)
     
     if dropout_rate:
@@ -368,12 +362,13 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
             x = __transition_block(x, nb_filter, compression=compression, dropout_rate=dropout_rate,
                                    weight_decay=weight_decay)
             nb_filter = int(nb_filter * compression)
-
-    # Once done, take an average pool of the spatial dimensions        
-    x = GlobalAveragePooling2D(name="final_embeddings")(x)
+            
     
     # Add final FC layer if requested
     if include_top:
+        # Once done, take an average pool of the spatial dimensions        
+        x = GlobalAveragePooling2D(name="final_embeddings")(x)    
+        
         if final_dropout:
             x = Dropout(final_dropout, name="final_dropout")(x)
             	
