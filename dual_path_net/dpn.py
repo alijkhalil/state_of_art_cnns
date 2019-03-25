@@ -15,7 +15,7 @@ from __future__ import division
 
 import warnings
 
-import sys, math
+import sys, math, os
 import numpy as np
 
 import tensorflow as tf
@@ -41,10 +41,12 @@ from keras.utils import to_categorical
 from keras.utils.layer_utils import convert_all_kernels_in_model
 from keras.utils.data_utils import get_file
 from keras.engine.topology import get_source_inputs
-from keras.applications.imagenet_utils import _obtain_input_shape
+from keras_applications.imagenet_utils import _obtain_input_shape
 
-sys.path.append("..")
-from dl_utilities.layers import general as dl_layers
+dir_path = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(dir_path + "/../../")     
+
+from dl_utilities.layers import general as dl_layers  # Requires 'sys.path' call above this
 
 
 USE_DROPPATH=True

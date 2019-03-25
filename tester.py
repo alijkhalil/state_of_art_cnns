@@ -1,12 +1,13 @@
 # Import statements
 import argparse
+import sys, os
 
 import tensorflow as tf
 import numpy as np
 
 from nas_net import nas_net
-from densenet import densenet
-from dual_path_net import dpn
+from densenet import densenet   
+from dual_path_net import dpn   
 from polynet import polynet
 
 import keras.backend as K
@@ -18,8 +19,8 @@ from keras.datasets import cifar100
 from keras.utils import to_categorical
 from keras.preprocessing.image import ImageDataGenerator
 
-from dl_utilities.callbacks import callback_utils as cb_utils
-from dl_utilities.datasets import dataset_utils as ds_utils
+from dl_utilities.callbacks import callback_utils as cb_utils  # Only works bc of the 'sys.path.append' call in the 'densenet' module
+from dl_utilities.datasets import dataset_utils as ds_utils  # Only works bc of the 'sys.path.append' call in the 'densenet' module
 
 
 

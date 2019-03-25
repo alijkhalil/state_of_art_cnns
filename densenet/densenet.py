@@ -54,13 +54,12 @@ from keras.utils import to_categorical
 from keras.utils.layer_utils import convert_all_kernels_in_model
 from keras.utils.data_utils import get_file
 from keras.engine.topology import get_source_inputs
-from keras.applications.imagenet_utils import _obtain_input_shape
+from keras_applications.imagenet_utils import _obtain_input_shape
 
-sys.path.append("..")
-from dl_utilities.layers import general as dl_layers    
+dir_path = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(dir_path + "/../../")     
 
-#from dl_utilities.callbacks import callback_utils as cb_utils   # FOR TESTING
-#from dl_utilities.datasets import dataset_utils as ds_utils     # FOR TESTING
+from dl_utilities.layers import general as dl_layers    # Requires the 'sys.path' call above this
 
 
 
@@ -432,8 +431,9 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
                                                        'Note that list size must be nb_dense_block'
         
         assert (np.sum(np.array(nb_layers)) + (nb_dense_block + 1) == depth), \
-                        ('Total number of layers must add up to %d.' % depth)
-        
+                        ('Total number of layers must add up to %d. Currently is %d.' % 
+                            (depth, np.sum(np.array(nb_layers)) + (nb_dense_block + 1)))
+                            
     else:
         if nb_layers_per_block == -1:
             assert ((depth - (nb_dense_block + 1)) % nb_dense_block == 0), \
@@ -508,11 +508,14 @@ def __create_dense_net(nb_classes, img_input, include_top, depth=40, nb_dense_bl
 '''
 if __name__ == '__main__':
 
-    # Import statements
+    # Testing specific import statements
     from keras.datasets import cifar100
     from keras.preprocessing.image import ImageDataGenerator
     from keras.callbacks import ModelCheckpoint
 
+    from dl_utilities.callbacks import callback_utils as cb_utils
+    from dl_utilities.datasets import dataset_utils as ds_utils    
+    
     
     # Get training/test data and normalize/standardize it
     num_classes = 100
